@@ -91,18 +91,25 @@ class TradingBot:
 
                     # Extract the price at which the order was executed
                     executed_price = buy_order.get('price')
-
-                   # Handle cases where 'price' is not available directly
                     if not executed_price or executed_price == 0:
                         executed_price = buy_order['cost'] / buy_order['filled'] if buy_order['filled'] > 0 else None
+
+                    # Amount bought in base currency
+                    amount_bought = buy_order.get('filled', 0)  # `filled` indicates how much of the base currency was purchased
+                    # Total cost in quote currency
+                    total_cost = buy_order.get('cost', 0)  # `cost` indicates the total spent in the quote currency
 
                     # Refresh balance after buy order
                     self.refresh_balance()
 
                     if executed_price:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - Executed Price: {executed_price} - Balance: {self.available_balance}", flush=True)
+                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - "
+                              f"Executed Price: {executed_price} - Base Bought: {amount_bought} - Cost: {total_cost} "
+                              f"- Balance: {self.available_balance}", flush=True)
                     else:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - Executed Price: Unknown - Balance: {self.available_balance}", flush=True)
+                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - "
+                              f"Executed Price: Unknown - Base Bought: {amount_bought} - Cost: {total_cost} "
+                              f"- Balance: {self.available_balance}", flush=True)
 
                     # Monitor price for target or stop-loss
                     while True:
