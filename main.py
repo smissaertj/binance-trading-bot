@@ -41,6 +41,14 @@ class TradingBot:
             print(f"Error fetching market data for {self.trading_pair}: {e}", flush=True)
             return None
 
+    def refresh_balance(self):
+        try:
+            balance = self.exchange.fetch_balance()
+            quote_currency = self.trading_pair.split('/')[1]  # Extract quote currency, e.g., 'USDT'
+            self.available_balance = balance[quote_currency]['free']
+        except Exception as e:
+            print(f"Error refreshing balance for {self.trading_pair}: {e}", flush=True)
+
     def calculate_position_size(self):
         try:
             balance = self.exchange.fetch_balance()
@@ -88,6 +96,9 @@ class TradingBot:
                     if not executed_price or executed_price == 0:
                         executed_price = buy_order['cost'] / buy_order['filled'] if buy_order['filled'] > 0 else None
 
+                    # Refresh balance after buy order
+                    self.refresh_balance()
+
                     if executed_price:
                         print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - Executed Price: {executed_price} - Balance: {self.available_balance}", flush=True)
                     else:
@@ -99,11 +110,15 @@ class TradingBot:
                         if current_price >= target_price:
                             # Place a sell order to take profit
                             sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
+                            # Refresh balance after sell order
+                            self.refresh_balance()
                             print(f"Scalping - {self.trading_pair} - Sell order placed at target {target_price} - Order ID {sell_order['id']} - Balance: {self.available_balance}", flush=True)
                             break
                         elif current_price <= stop_loss_price:
                             # Place a sell order to stop loss
                             sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
+                            # Refresh balance after sell order
+                            self.refresh_balance()
                             print(f"Scalping - {self.trading_pair} - Stop Loss triggered at {stop_loss_price} - Order ID {sell_order['id']} - Balance: {self.available_balance}", flush=True)
                             break
                         time.sleep(5)  # Adjust based on desired frequency
@@ -112,7 +127,7 @@ class TradingBot:
 
                 # Pause briefly before starting the next cycle
                 print(f"Scalping - {self.trading_pair} - Cycle complete. Restarting...")
-                time.sleep(5)  # Prevent rapid retries
+                time.sleep(5)
 
 
     def run(self):
