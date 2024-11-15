@@ -21,6 +21,7 @@ podman run -it --rm \
     -e PROFIT_TARGET_PERCENTAGE="0.005" \
     -e PERCENTAGE_OF_BALANCE="0.05" \
     -e TRADING_PAIRS="ADA/USDT,CKB/USDT" \
+    -e SANDBOX_MODE="True" \
     --name ada-ckb-usdt-trading-bot \
     binance-trading-bot
 ```

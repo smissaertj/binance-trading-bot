@@ -13,6 +13,7 @@ class TradingBot:
         self.profit_target = float(os.getenv("PROFIT_TARGET_PERCENTAGE", 0.005))  # Default 0.5%
         self.percentage_of_balance = float(os.getenv("PERCENTAGE_OF_BALANCE", 0.05))  # Default 5%
         self.stop_flag = threading.Event()  # Create a stop flag
+        sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
 
         if not self.api_key or not self.api_secret:
             raise ValueError("API_KEY and API_SECRET environment variables must be set.")
@@ -26,10 +27,11 @@ class TradingBot:
             },
         })
 
-        self.exchange.set_sandbox_mode(True)
+        self.exchange.set_sandbox_mode(sandbox_mode)
         self.trading_pair = trading_pair
         self.strategy = strategy
         self.position_size = 0  # To store position size for buy/sell consistency
+        self.available_balance = 0  # Keep track of remaining base currency amount
 
     def fetch_market_data(self):
         try:
@@ -43,7 +45,7 @@ class TradingBot:
         try:
             balance = self.exchange.fetch_balance()
             quote_currency = self.trading_pair.split('/')[1]  # Extract quote currency, e.g., 'USDT'
-            available_balance = balance[quote_currency]['free']  # Available balance in quote currency
+            self.available_balance = balance[quote_currency]['free']  # Available balance in quote currency
 
             # Fetch the current price of the trading pair
             ticker = self.fetch_market_data()
@@ -52,8 +54,8 @@ class TradingBot:
             current_price = ticker['last']
 
             # Calculate position size for buy orders
-            position_size = (available_balance * self.percentage_of_balance) / current_price
-            print(f"[{self.trading_pair}] Available Balance: {available_balance:.2f} {quote_currency}, Position Size: {position_size:.6f}", flush=True)
+            position_size = (self.available_balance * self.percentage_of_balance) / current_price
+            print(f"[{self.trading_pair}] Available Balance: {self.available_balance:.2f} {quote_currency}, Position Size: {position_size:.6f}", flush=True)
             return position_size
         except Exception as e:
             print(f"Error calculating position size for {self.trading_pair}: {e}", flush=True)
@@ -87,9 +89,9 @@ class TradingBot:
                         executed_price = buy_order['cost'] / buy_order['filled'] if buy_order['filled'] > 0 else None
 
                     if executed_price:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']}, Executed Price: {executed_price}")
+                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - Executed Price: {executed_price} - Balance: {self.available_balance}", flush=True)
                     else:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']}, Executed Price: Unknown")
+                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - Executed Price: Unknown - Balance: {self.available_balance}", flush=True)
 
                     # Monitor price for target or stop-loss
                     while True:
@@ -97,12 +99,12 @@ class TradingBot:
                         if current_price >= target_price:
                             # Place a sell order to take profit
                             sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
-                            print(f"Scalping - {self.trading_pair} - Sell order placed at target {target_price}: Order ID {sell_order['id']}", flush=True)
+                            print(f"Scalping - {self.trading_pair} - Sell order placed at target {target_price} - Order ID {sell_order['id']} - Balance: {self.available_balance}", flush=True)
                             break
                         elif current_price <= stop_loss_price:
                             # Place a sell order to stop loss
                             sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
-                            print(f"Scalping - {self.trading_pair} - Stop Loss triggered at {stop_loss_price}: Order ID {sell_order['id']}", flush=True)
+                            print(f"Scalping - {self.trading_pair} - Stop Loss triggered at {stop_loss_price} - Order ID {sell_order['id']} - Balance: {self.available_balance}", flush=True)
                             break
                         time.sleep(5)  # Adjust based on desired frequency
                 except Exception as e:

@@ -8,5 +8,6 @@ services:
       STOP_LOSS_PERCENTAGE: "0.015"
       PROFIT_TARGET_PERCENTAGE: "0.005"
       PERCENTAGE_OF_BALANCE: "0.05"
+      SANDBOX_MODE: "True"
     container_name: ada-ckb-usdt-trading-bot
     restart: unless-stopped
