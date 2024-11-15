@@ -4,6 +4,14 @@ FROM python:3.13-slim
 # Set working directory
 WORKDIR /app
 
+# Install system dependencies for building Python packages
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    python3-dev \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+
 # Copy only the required files
 COPY main.py .
 COPY requirements.txt .
