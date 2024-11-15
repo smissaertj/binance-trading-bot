@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  trading-bot-ada-ckb:
+    image: binance-trading-bot:latest
+    environment:
+      API_KEY: "your_api_key"
+      API_SECRET: "your_api_secret"
+      STOP_LOSS_PERCENTAGE: "0.015"
+      PROFIT_TARGET_PERCENTAGE: "0.005"
+      PERCENTAGE_OF_BALANCE: "0.05"
+    container_name: ada-ckb-usdt-trading-bot
+    restart: unless-stopped
