@@ -103,13 +103,13 @@ class TradingBot:
                     self.refresh_balance()
 
                     if executed_price:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - "
-                              f"Executed Price: {executed_price} - Base Bought: {amount_bought} - Cost: {total_cost} "
-                              f"- Balance: {self.available_balance}", flush=True)
+                        print(f"Scalping - {self.trading_pair} - Buy order placed - Order ID {buy_order['id']} - "
+                              f"Executed Price: {executed_price} - Crypto amount Bought: {amount_bought} - USDT Cost: {total_cost} "
+                              f"- USDT Balance: {self.available_balance}", flush=True)
                     else:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed: Order ID {buy_order['id']} - "
-                              f"Executed Price: Unknown - Base Bought: {amount_bought} - Cost: {total_cost} "
-                              f"- Balance: {self.available_balance}", flush=True)
+                        print(f"Scalping - {self.trading_pair} - Buy order placed - Order ID {buy_order['id']} - "
+                              f"Executed Price: Unknown - Crypto Amount Bought: {amount_bought} - USDT Cost: {total_cost} "
+                              f"- USDT Balance: {self.available_balance}", flush=True)
 
                     # Monitor price for target or stop-loss
                     while True:
@@ -119,14 +119,14 @@ class TradingBot:
                             sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
                             # Refresh balance after sell order
                             self.refresh_balance()
-                            print(f"Scalping - {self.trading_pair} - Sell order placed at target {target_price} - Order ID {sell_order['id']} - Balance: {self.available_balance}", flush=True)
+                            print(f"Scalping - {self.trading_pair} - Sell order placed at target {target_price} - Order ID {sell_order['id']} - USDT Balance: {self.available_balance}", flush=True)
                             break
                         elif current_price <= stop_loss_price:
                             # Place a sell order to stop loss
                             sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
                             # Refresh balance after sell order
                             self.refresh_balance()
-                            print(f"Scalping - {self.trading_pair} - Stop Loss triggered at {stop_loss_price} - Order ID {sell_order['id']} - Balance: {self.available_balance}", flush=True)
+                            print(f"Scalping - {self.trading_pair} - Stop Loss triggered at {stop_loss_price} - Order ID {sell_order['id']} - USDT Balance: {self.available_balance}", flush=True)
                             break
                         time.sleep(5)  # Adjust based on desired frequency
                 except Exception as e:
