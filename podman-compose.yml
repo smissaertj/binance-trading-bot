@@ -5,9 +5,13 @@ services:
     environment:
       API_KEY: "your_api_key"
       API_SECRET: "your_api_secret"
-      STOP_LOSS_PERCENTAGE: "0.015"
-      PROFIT_TARGET_PERCENTAGE: "0.005"
-      PERCENTAGE_OF_BALANCE: "0.05"
+      STRATEGY: "market_making"
+      SCALP_STOP_LOSS_PERCENTAGE: "0.015"
+      SCALP_PROFIT_TARGET_PERCENTAGE: "0.005"
+      SCALP_PERCENTAGE_OF_BALANCE: "0.05"
+      MM_SPREAD_PERCENTAGE: "0.002"
+      MM_ORDER_SIZE: "0.01"
+      TRADING_PAIRS: "ADA/USDT,CKB/USDT"
       SANDBOX_MODE: "True"
     container_name: ada-ckb-usdt-trading-bot
     restart: unless-stopped
