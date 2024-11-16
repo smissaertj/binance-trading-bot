@@ -191,6 +191,7 @@ class TradingBot:
                 min_order_size = self.get_minimum_order_size()
 
                 if order_size < min_order_size:
+                    self.order_size = min_order_size
                     print(f"Market making - {self.trading_pair} - Adjusted order size to meet minimum order size of: {min_order_size}.", flush=True)
                     time.sleep(5)
                     continue
