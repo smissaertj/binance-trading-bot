@@ -53,6 +53,27 @@ class TradingBot:
         except Exception as e:
             print(f"Error refreshing balance for {self.trading_pair}: {e}", flush=True)
 
+
+    def get_minimum_notional(self):
+        try:
+            market = self.exchange.market(self.trading_pair)
+            min_notional = market['limits']['cost']['min']  # Minimum notional value
+            return min_notional
+        except Exception as e:
+            print(f"Error fetching minimum notional for {self.trading_pair}: {e}", flush=True)
+            return 0
+
+
+    def get_minimum_order_size(self):
+        try:
+            market = self.exchange.market(self.trading_pair)
+            min_order_size = market['limits']['amount']['min']  # Minimum order size
+            return min_order_size
+        except Exception as e:
+            print(f"Error fetching minimum order size for {self.trading_pair}: {e}", flush=True)
+            return 0
+
+
     def calculate_position_size(self):
         try:
             balance = self.exchange.fetch_balance()
@@ -156,12 +177,30 @@ class TradingBot:
 
                 current_price = ticker['last']
 
+                # Fetch minimum notional value
+                min_notional = self.get_minimum_notional()
+
                 # Calculate limit order prices adjusted for fees
                 buy_price = current_price * (1 - self.spread_percentage - self.trading_fee)
                 sell_price = current_price * (1 + self.spread_percentage + self.trading_fee)
 
-                # Determine the oder size dynamically
+                # Determine the order size dynamically
                 order_size = self.order_size if self.order_size else self.available_balance * self.percentage_of_balance / current_price
+
+                # Fetch the minimum order size
+                min_order_size = self.get_minimum_order_size()
+
+                if order_size < min_order_size:
+                    print(f"Market making - {self.trading_pair} - Adjusted order size to meet minimum order size of: {min_order_size}.", flush=True)
+                    time.sleep(5)
+                    continue
+
+                # Check if the order meets the minimum notional value
+                notional_value = order_size * buy_price
+                if notional_value < min_notional:
+                    # Adjust the order size to meet the minimum notional value
+                    order_size = min_notional / buy_price
+                    print(f"Market making - {self.trading_pair} - Adjusted order size to meet minimum notional: {order_size:.6f}", flush=True)
 
                 # Place limit buy order
                 buy_order = self.exchange.create_limit_buy_order(self.trading_pair, order_size, buy_price)
@@ -170,8 +209,8 @@ class TradingBot:
                 buy_fee = order_size * buy_price * self.trading_fee
                 effective_buy = order_size * (1 - self.trading_fee)
 
-                print(f"Market making - {self.trading_pair} - Buy order placed: Price {buy_price:.6f} - "
-                      f"Size {order_size} - Fee: {buy_fee:.6f} - Effective Bought: {effective_buy:.6f}", flush=True)
+                print(f"Market making - {self.trading_pair} - Buy order placed: Price {buy_price:.6f}, "
+                      f"Size {order_size}, Fee: {buy_fee:.6f}, Effective Bought: {effective_buy:.6f}", flush=True)
 
                 # Place limit sell order
                 sell_order = self.exchange.create_limit_sell_order(self.trading_pair, order_size, sell_price)
@@ -180,8 +219,8 @@ class TradingBot:
                 sell_fee = order_size * sell_price * self.trading_fee
                 effective_sell = order_size * sell_price * (1 - self.trading_fee)
 
-                print(f"Market making - {self.trading_pair} - Sell order placed: Price {sell_price:.6f} - "
-                      f"Size {order_size} - Fee: {sell_fee:.6f} - Effective Proceeds: {effective_sell:.6f}", flush=True)
+                print(f"Market making - {self.trading_pair} - Sell order placed: Price {sell_price:.6f}, "
+                      f"Size {order_size}, Fee: {sell_fee:.6f}, Effective Proceeds: {effective_sell:.6f}", flush=True)
 
                 # Monitor and adjust orders
                 time.sleep(10)  # Adjust frequency as needed
@@ -194,6 +233,7 @@ class TradingBot:
             except Exception as e:
                 print(f"Error executing market making strategy for {self.trading_pair}: {e}", flush=True)
                 time.sleep(5)
+
 
 
     def run(self):
@@ -215,11 +255,12 @@ if __name__ == "__main__":
     bots = []
 
     # Start bots
-    for pair in trading_pairs:
+    for i, pair in enumerate(trading_pairs):
         bot = TradingBot(trading_pair=pair, strategy=strat)
         thread = threading.Thread(target=bot.run)
         bots.append((bot, thread))
         thread.start()
+        time.sleep(5)  # Stagger starts to avoid API rate limits
 
     try:
         # Ensures the main program stays active and does not exit immediately after starting the threads.
