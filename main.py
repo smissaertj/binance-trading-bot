@@ -13,7 +13,7 @@ class TradingBot:
         self.stop_loss = float(os.getenv("SCALP_STOP_LOSS_PERCENTAGE", 0.015))  # Scalping, Default 1.5%
         self.profit_target = float(os.getenv("SCALP_PROFIT_TARGET_PERCENTAGE", 0.005))  # Scalping, Default 0.5%
         self.percentage_of_balance = float(os.getenv("SCALP_PERCENTAGE_OF_BALANCE", 0.05))  # Scalping, Default 5%
-        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.02))  # Market Making, Default 2%
+        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.03))  # Market Making, Default 3%
         self.order_size = float(os.getenv("MM_ORDER_SIZE", 0))  # Default: Dynamically calculated if not set
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
