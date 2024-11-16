@@ -9,9 +9,13 @@ class TradingBot:
         # Load parameters from environment variables or use defaults
         self.api_key = os.getenv("API_KEY")
         self.api_secret = os.getenv("API_SECRET")
-        self.stop_loss = float(os.getenv("STOP_LOSS_PERCENTAGE", 0.015))  # Default 1.5%
-        self.profit_target = float(os.getenv("PROFIT_TARGET_PERCENTAGE", 0.005))  # Default 0.5%
-        self.percentage_of_balance = float(os.getenv("PERCENTAGE_OF_BALANCE", 0.05))  # Default 5%
+        self.trading_fee = float(os.getenv("TRADING_FEE", 0.001))  # Default Binance 0.1% Spot Trading fee
+        self.stop_loss = float(os.getenv("SCALP_STOP_LOSS_PERCENTAGE", 0.015))  # Scalping, Default 1.5%
+        self.profit_target = float(os.getenv("SCALP_PROFIT_TARGET_PERCENTAGE", 0.005))  # Scalping, Default 0.5%
+        self.percentage_of_balance = float(os.getenv("SCALP_PERCENTAGE_OF_BALANCE", 0.05))  # Scalping, Default 5%
+        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.002))  # Market Making, Default 0.2%
+        self.order_size = float(os.getenv("MM_ORDER_SIZE", 0.05))  # Market Making, Default 5% of the base currency balance
+
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
 
@@ -137,9 +141,64 @@ class TradingBot:
                 time.sleep(5)
 
 
+    def market_making_strategy(self):
+        if self.spread_percentage < 2 * self.trading_fee:
+            raise ValueError(f"Spread percentage ({self.spread_percentage}) is too low to cover trading fees of ({2 * self.trading_fee}%). Increase the spread.")
+
+        while not self.stop_flag.is_set():
+            try:
+                # Fetch current market price
+                ticker = self.fetch_market_data()
+                if not ticker:
+                    print(f"Market making - {self.trading_pair} - Failed to fetch market data.", flush=True)
+                    time.sleep(5)
+                    continue
+
+                current_price = ticker['last']
+
+                # Calculate limit order prices adjusted for fees
+                buy_price = current_price * (1 - self.spread_percentage - self.trading_fee)
+                sell_price = current_price * (1 + self.spread_percentage + self.trading_fee)
+
+                # Determine the oder size dynamically
+                order_size = self.order_size if self.order_size else self.available_balance * self.percentage_of_balance / current_price
+
+                # Place limit buy order
+                buy_order = self.exchange.create_limit_buy_order(self.trading_pair, order_size, buy_price)
+
+                # Calculate fee and effective amount bought
+                buy_fee = order_size * buy_price * self.trading_fee
+                effective_buy = order_size * (1 - self.trading_fee)
+
+                print(f"Market making - {self.trading_pair} - Buy order placed: Price {buy_price:.6f} - "
+                      f"Size {order_size} - Fee: {buy_fee:.6f} - Effective Bought: {effective_buy:.6f}", flush=True)
+
+                # Place limit sell order
+                sell_order = self.exchange.create_limit_sell_order(self.trading_pair, order_size, sell_price)
+
+                # Calculate fee and effective proceeds
+                sell_fee = order_size * sell_price * self.trading_fee
+                effective_sell = order_size * sell_price * (1 - self.trading_fee)
+
+                print(f"Market making - {self.trading_pair} - Sell order placed: Price {sell_price:.6f} - "
+                      f"Size {order_size} - Fee: {sell_fee:.6f} - Effective Proceeds: {effective_sell:.6f}", flush=True)
+
+                # Monitor and adjust orders
+                time.sleep(10)  # Adjust frequency as needed
+
+                # Cancel unfilled orders and refresh
+                self.exchange.cancel_order(buy_order['id'], self.trading_pair)
+                self.exchange.cancel_order(sell_order['id'], self.trading_pair)
+                print(f"Market making - {self.trading_pair} - Cancelled unfilled orders.", flush=True)
+
+            except Exception as e:
+                print(f"Error executing market making strategy for {self.trading_pair}: {e}", flush=True)
+                time.sleep(5)
+
+
     def run(self):
         if self.strategy == 'market_making':
-            print("Market making strategy is not implemented yet.")
+            self.market_making_strategy()
         elif self.strategy == 'scalping':
             self.scalping_strategy()
         else:
@@ -151,12 +210,13 @@ class TradingBot:
 
 
 if __name__ == "__main__":
+    strat = os.getenv("STRATEGY", "market_making") # One of ["scalping", "market_making"]
     trading_pairs = os.getenv("TRADING_PAIRS", "ADA/USDT,CKB/USDT").split(",")
     bots = []
 
     # Start bots
     for pair in trading_pairs:
-        bot = TradingBot(trading_pair=pair, strategy='scalping')
+        bot = TradingBot(trading_pair=pair, strategy=strat)
         thread = threading.Thread(target=bot.run)
         bots.append((bot, thread))
         thread.start()
