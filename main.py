@@ -13,9 +13,8 @@ class TradingBot:
         self.stop_loss = float(os.getenv("SCALP_STOP_LOSS_PERCENTAGE", 0.015))  # Scalping, Default 1.5%
         self.profit_target = float(os.getenv("SCALP_PROFIT_TARGET_PERCENTAGE", 0.005))  # Scalping, Default 0.5%
         self.percentage_of_balance = float(os.getenv("SCALP_PERCENTAGE_OF_BALANCE", 0.05))  # Scalping, Default 5%
-        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.002))  # Market Making, Default 0.2%
-        self.order_size = float(os.getenv("MM_ORDER_SIZE", 0.05))  # Market Making, Default 5% of the base currency balance
-
+        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.02))  # Market Making, Default 2%
+        self.order_size = float(os.getenv("MM_ORDER_SIZE", 0))  # Default: Dynamically calculated if not set
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
 
@@ -31,11 +30,25 @@ class TradingBot:
             },
         })
 
+        self.exchange.verbose = False
         self.exchange.set_sandbox_mode(sandbox_mode)
         self.trading_pair = trading_pair
         self.strategy = strategy
         self.position_size = 0  # To store position size for buy/sell consistency
         self.available_balance = 0  # Keep track of remaining base currency amount
+
+        # Load markets to fetch trading pair metadata
+        print("Loading Binance markets...", flush=True)
+        self.exchange.load_markets()
+        print("Markets loaded successfully.", flush=True)
+
+        # Validate and adjust order size at initialization
+        if self.order_size > 0:  # Only validate if explicitly configured
+            min_order_size = self.get_minimum_order_size()
+            if self.order_size < min_order_size:
+                print(f"Warning: Provided order size {self.order_size} is below minimum order size {min_order_size}. Adjusting to minimum.", flush=True)
+                self.order_size = min_order_size
+
 
     def fetch_market_data(self):
         try:
@@ -44,6 +57,7 @@ class TradingBot:
         except Exception as e:
             print(f"Error fetching market data for {self.trading_pair}: {e}", flush=True)
             return None
+
 
     def refresh_balance(self):
         try:
@@ -58,6 +72,7 @@ class TradingBot:
         try:
             market = self.exchange.market(self.trading_pair)
             min_notional = market['limits']['cost']['min']  # Minimum notional value
+            print(f"Market making - {self.trading_pair} - Minimum notional: {min_notional}", flush=True)
             return min_notional
         except Exception as e:
             print(f"Error fetching minimum notional for {self.trading_pair}: {e}", flush=True)
@@ -68,6 +83,7 @@ class TradingBot:
         try:
             market = self.exchange.market(self.trading_pair)
             min_order_size = market['limits']['amount']['min']  # Minimum order size
+            print(f"Market making - {self.trading_pair} - Minimum order size: {min_order_size}", flush=True)
             return min_order_size
         except Exception as e:
             print(f"Error fetching minimum order size for {self.trading_pair}: {e}", flush=True)
@@ -93,6 +109,7 @@ class TradingBot:
         except Exception as e:
             print(f"Error calculating position size for {self.trading_pair}: {e}", flush=True)
             return 0
+
 
     def scalping_strategy(self):
         while not self.stop_flag.is_set():  # Check stop flag: # Keep trading continuously
@@ -159,82 +176,84 @@ class TradingBot:
 
                 # Pause briefly before starting the next cycle
                 print(f"Scalping - {self.trading_pair} - Cycle complete. Restarting...")
-                time.sleep(5)
+                time.sleep(60)
 
 
     def market_making_strategy(self):
         if self.spread_percentage < 2 * self.trading_fee:
-            raise ValueError(f"Spread percentage ({self.spread_percentage}) is too low to cover trading fees of ({2 * self.trading_fee}%). Increase the spread.")
+            raise ValueError(f"Spread percentage ({self.spread_percentage}) is too low to cover trading fees ({2 * self.trading_fee}%). Increase the spread.")
 
         while not self.stop_flag.is_set():
             try:
-                # Fetch current market price
+                print(f"Market making - {self.trading_pair} - Fetching market data...")
                 ticker = self.fetch_market_data()
                 if not ticker:
-                    print(f"Market making - {self.trading_pair} - Failed to fetch market data.", flush=True)
+                    print(f"Market making - {self.trading_pair} - Failed to fetch market data.")
                     time.sleep(5)
                     continue
 
                 current_price = ticker['last']
+                print(f"Market making - {self.trading_pair} - Current price: {current_price:.6f}")
 
-                # Fetch minimum notional value
+                # Fetch market limits
                 min_notional = self.get_minimum_notional()
+                min_order_size = self.get_minimum_order_size()
 
                 # Calculate limit order prices adjusted for fees
                 buy_price = current_price * (1 - self.spread_percentage - self.trading_fee)
                 sell_price = current_price * (1 + self.spread_percentage + self.trading_fee)
+                print(f"Market making - {self.trading_pair} - Buy price: {buy_price:.6f}, Sell price: {sell_price:.6f}")
 
-                # Determine the order size dynamically
-                order_size = self.order_size if self.order_size else self.available_balance * self.percentage_of_balance / current_price
+                # Calculate dynamic order size
+                order_size = self.order_size if self.order_size > 0 else self.available_balance * self.percentage_of_balance / current_price
 
-                # Fetch the minimum order size
-                min_order_size = self.get_minimum_order_size()
-
+                # Adjust for minimum order size
                 if order_size < min_order_size:
-                    self.order_size = min_order_size
-                    print(f"Market making - {self.trading_pair} - Adjusted order size to meet minimum order size of: {min_order_size}.", flush=True)
-                    time.sleep(5)
-                    continue
+                    order_size = min_order_size
+                    print(f"Adjusted order size to meet minimum order size: {order_size:.6f}")
 
-                # Check if the order meets the minimum notional value
+                # Adjust for minimum notional value
                 notional_value = order_size * buy_price
                 if notional_value < min_notional:
-                    # Adjust the order size to meet the minimum notional value
                     order_size = min_notional / buy_price
-                    print(f"Market making - {self.trading_pair} - Adjusted order size to meet minimum notional: {order_size:.6f}", flush=True)
+                    print(f"Adjusted order size to meet minimum notional: {order_size:.6f}")
+
+                # Enforce precision
+                order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
+                print(f"Final adjusted order size after precision: {order_size}")
+
+                # Recalculate notional value after enforcing precision
+                notional_value = order_size * buy_price
+                if notional_value < min_notional:
+                    print(f"Final notional value {notional_value:.6f} is still below the minimum of {min_notional}. Adjusting further...")
+                    order_size = (min_notional / buy_price) + (10 ** -self.exchange.markets[self.trading_pair]['precision']['amount'])
+                    order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
+                    print(f"Final adjusted order size to meet notional after precision: {order_size:.6f}")
 
                 # Place limit buy order
                 buy_order = self.exchange.create_limit_buy_order(self.trading_pair, order_size, buy_price)
-
-                # Calculate fee and effective amount bought
-                buy_fee = order_size * buy_price * self.trading_fee
-                effective_buy = order_size * (1 - self.trading_fee)
-
-                print(f"Market making - {self.trading_pair} - Buy order placed: Price {buy_price:.6f}, "
-                      f"Size {order_size}, Fee: {buy_fee:.6f}, Effective Bought: {effective_buy:.6f}", flush=True)
+                print(f"Market making - {self.trading_pair} - Buy order placed - Price: {buy_order['price']} - Amount: {buy_order['amount']}")
 
                 # Place limit sell order
                 sell_order = self.exchange.create_limit_sell_order(self.trading_pair, order_size, sell_price)
+                print(f"Market making - {self.trading_pair} - Sell order placed - Price: {sell_order['price']} - Amount: {sell_order['amount']}")
 
-                # Calculate fee and effective proceeds
-                sell_fee = order_size * sell_price * self.trading_fee
-                effective_sell = order_size * sell_price * (1 - self.trading_fee)
+                # Monitor orders for execution or adjust prices dynamically
+                time.sleep(60)  # TODO - Adjust the time to wait before checking if an order has been filled.
+                filled_buy = buy_order['filled'] > 0
+                filled_sell = sell_order['filled'] > 0
 
-                print(f"Market making - {self.trading_pair} - Sell order placed: Price {sell_price:.6f}, "
-                      f"Size {order_size}, Fee: {sell_fee:.6f}, Effective Proceeds: {effective_sell:.6f}", flush=True)
-
-                # Monitor and adjust orders
-                time.sleep(10)  # Adjust frequency as needed
-
-                # Cancel unfilled orders and refresh
-                self.exchange.cancel_order(buy_order['id'], self.trading_pair)
-                self.exchange.cancel_order(sell_order['id'], self.trading_pair)
-                print(f"Market making - {self.trading_pair} - Cancelled unfilled orders.", flush=True)
+                # Cancel and replace unfilled orders after a timeout
+                if not filled_buy:
+                    self.exchange.cancel_order(buy_order['id'], self.trading_pair)
+                    print(f"Market making - {self.trading_pair} - Buy order {buy_order['id']} unfilled, canceled and will be adjusted.")
+                if not filled_sell:
+                    self.exchange.cancel_order(sell_order['id'], self.trading_pair)
+                    print(f"Market making - {self.trading_pair} - Sell order {sell_order['id']} unfilled, canceled and will be adjusted.")
 
             except Exception as e:
-                print(f"Error executing market making strategy for {self.trading_pair}: {e}", flush=True)
+                print(f"Error executing market making strategy for {self.trading_pair}: {e}")
                 time.sleep(5)
-
 
 
     def run(self):
