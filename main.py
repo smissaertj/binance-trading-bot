@@ -13,7 +13,7 @@ class TradingBot:
         self.stop_loss = float(os.getenv("SCALP_STOP_LOSS_PERCENTAGE", 0.015))  # Scalping, Default 1.5%
         self.profit_target = float(os.getenv("SCALP_PROFIT_TARGET_PERCENTAGE", 0.005))  # Scalping, Default 0.5%
         self.percentage_of_balance = float(os.getenv("SCALP_PERCENTAGE_OF_BALANCE", 0.05))  # Scalping, Default 5%
-        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.02))  # Market Making, Default 2%
+        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.03))  # Market Making, Default 3%
         self.order_size = float(os.getenv("MM_ORDER_SIZE", 0))  # Default: Dynamically calculated if not set
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
@@ -215,8 +215,12 @@ class TradingBot:
                 # Adjust for minimum notional value
                 notional_value = order_size * buy_price
                 if notional_value < min_notional:
-                    order_size = min_notional / buy_price
-                    print(f"Adjusted order size to meet minimum notional: {order_size:.6f}")
+                    print(f"Final notional value {notional_value:.6f} is still below the minimum of {min_notional}. Adjusting further...")
+                    # Add a small buffer to ensure the adjusted size exceeds the minimum notional
+                    buffer = 10 ** -self.exchange.markets[self.trading_pair]['precision']['amount']
+                    order_size = (min_notional / buy_price) + buffer
+                    order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
+                    print(f"Final adjusted order size to meet notional after precision: {order_size:.6f}")
 
                 # Enforce precision
                 order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
@@ -240,14 +244,20 @@ class TradingBot:
 
                 # Monitor orders for execution or adjust prices dynamically
                 time.sleep(60)  # TODO - Adjust the time to wait before checking if an order has been filled.
-                filled_buy = buy_order['filled'] > 0
-                filled_sell = sell_order['filled'] > 0
 
-                # Cancel and replace unfilled orders after a timeout
-                if not filled_buy:
+                buy_order_status = self.exchange.fetch_order(buy_order['id'], self.trading_pair)
+                filled_buy = buy_order_status['status'] == 'closed'  # 'closed' means the order was filled
+                if filled_buy:
+                    print(f"Market making - {self.trading_pair} - Buy order {buy_order['id']} was filled successfully.")
+                else:
                     self.exchange.cancel_order(buy_order['id'], self.trading_pair)
                     print(f"Market making - {self.trading_pair} - Buy order {buy_order['id']} unfilled, canceled and will be adjusted.")
-                if not filled_sell:
+
+                sell_order_status = self.exchange.fetch_order(sell_order['id'], self.trading_pair)
+                filled_sell = sell_order_status['status'] == 'closed'  # 'closed' means the order was filled
+                if filled_sell:
+                    print(f"Market making - {self.trading_pair} - Sell order {sell_order['id']} was filled successfully.")
+                else:
                     self.exchange.cancel_order(sell_order['id'], self.trading_pair)
                     print(f"Market making - {self.trading_pair} - Sell order {sell_order['id']} unfilled, canceled and will be adjusted.")
 
