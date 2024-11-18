@@ -5,16 +5,14 @@ import time
 
 
 class TradingBot:
-    def __init__(self, trading_pair, strategy='scalping'):
+    def __init__(self, trading_pair):
         # Load parameters from environment variables or use defaults
         self.api_key = os.getenv("API_KEY")
         self.api_secret = os.getenv("API_SECRET")
         self.trading_fee = float(os.getenv("TRADING_FEE", 0.001))  # Default Binance 0.1% Spot Trading fee
-        self.stop_loss = float(os.getenv("SCALP_STOP_LOSS_PERCENTAGE", 0.015))  # Scalping, Default 1.5%
-        self.profit_target = float(os.getenv("SCALP_PROFIT_TARGET_PERCENTAGE", 0.005))  # Scalping, Default 0.5%
-        self.percentage_of_balance = float(os.getenv("SCALP_PERCENTAGE_OF_BALANCE", 0.05))  # Scalping, Default 5%
-        self.spread_percentage = float(os.getenv("MM_SPREAD_PERCENTAGE", 0.03))  # Market Making, Default 3%
-        self.order_size = float(os.getenv("MM_ORDER_SIZE", 0))  # Default: Dynamically calculated if not set
+        self.spread_percentage = float(os.getenv("SPREAD_PERCENTAGE", 0.025))  # Market Making, Default 2.5% # TODO - Dynamically adjust based on market conditions.
+        self.percentage_of_balance = float(os.getenv("PERCENTAGE_OF_BALANCE", 0.05))
+        self.trade_interval = float(os.getenv("TRADE_INTERVAL", 30))
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
 
@@ -33,7 +31,6 @@ class TradingBot:
         self.exchange.verbose = False
         self.exchange.set_sandbox_mode(sandbox_mode)
         self.trading_pair = trading_pair
-        self.strategy = strategy
         self.position_size = 0  # To store position size for buy/sell consistency
         self.available_balance = 0  # Keep track of remaining base currency amount
 
@@ -41,13 +38,6 @@ class TradingBot:
         print("Loading Binance markets...", flush=True)
         self.exchange.load_markets()
         print("Markets loaded successfully.", flush=True)
-
-        # Validate and adjust order size at initialization
-        if self.order_size > 0:  # Only validate if explicitly configured
-            min_order_size = self.get_minimum_order_size()
-            if self.order_size < min_order_size:
-                print(f"Warning: Provided order size {self.order_size} is below minimum order size {min_order_size}. Adjusting to minimum.", flush=True)
-                self.order_size = min_order_size
 
 
     def fetch_market_data(self):
@@ -62,8 +52,9 @@ class TradingBot:
     def refresh_balance(self):
         try:
             balance = self.exchange.fetch_balance()
-            quote_currency = self.trading_pair.split('/')[1]  # Extract quote currency, e.g., 'USDT'
-            self.available_balance = balance[quote_currency]['free']
+            print(f"Available USDT: {balance['USDT']['free']}", flush=True)
+            print(f"Locked USDT: {balance['USDT']['used']}", flush=True)
+            self.available_balance = balance['USDT']['free']
         except Exception as e:
             print(f"Error refreshing balance for {self.trading_pair}: {e}", flush=True)
 
@@ -92,9 +83,7 @@ class TradingBot:
 
     def calculate_position_size(self):
         try:
-            balance = self.exchange.fetch_balance()
             quote_currency = self.trading_pair.split('/')[1]  # Extract quote currency, e.g., 'USDT'
-            self.available_balance = balance[quote_currency]['free']  # Available balance in quote currency
 
             # Fetch the current price of the trading pair
             ticker = self.fetch_market_data()
@@ -104,6 +93,7 @@ class TradingBot:
 
             # Calculate position size for buy orders
             position_size = (self.available_balance * self.percentage_of_balance) / current_price
+            position_size = float(self.exchange.amount_to_precision(self.trading_pair, position_size))
             print(f"[{self.trading_pair}] Available Balance: {self.available_balance:.2f} {quote_currency}, Position Size: {position_size:.6f}", flush=True)
             return position_size
         except Exception as e:
@@ -111,72 +101,137 @@ class TradingBot:
             return 0
 
 
-    def scalping_strategy(self):
-        while not self.stop_flag.is_set():  # Check stop flag: # Keep trading continuously
-            ticker = self.fetch_market_data()
-            if ticker:
-                entry_price = ticker['last']
-                stop_loss_price = entry_price * (1 - self.stop_loss)
-                target_price = entry_price * (1 + self.profit_target)
+    def is_downward_trend(self, period=5):
+        try:
+            # Fetch historical data for the trading pair
+            ohlcv = self.exchange.fetch_ohlcv(self.trading_pair, timeframe='15m', limit=period)
+            close_prices = [x[4] for x in ohlcv]  # Extract closing prices
 
-                # Calculate position size
-                self.position_size = self.calculate_position_size()
-                if self.position_size <= 0:
-                    print(f"Invalid position size for {self.trading_pair}. Skipping trade.", flush=True)
+            # Calculate a simple moving average
+            avg_price = sum(close_prices) / len(close_prices)
+
+            # Compare the latest price to the average
+            current_price = close_prices[-1]
+            print(f"Current price: {current_price}, Moving average: {avg_price}", flush=True)
+            return current_price < avg_price  # Downward trend if current price < average
+        except Exception as e:
+            print(f"Error detecting trend for {self.trading_pair}: {e}")
+            return False
+
+
+    def calculate_order_prices(self, current_price):
+        """Calculate buy and sell prices based on current price and spread."""
+        buy_price = current_price * (1 - self.spread_percentage - self.trading_fee)
+        sell_price = current_price * (1 + self.spread_percentage + self.trading_fee)
+        buy_price = float(self.exchange.price_to_precision(self.trading_pair, buy_price))
+        sell_price = float(self.exchange.price_to_precision(self.trading_pair, sell_price))
+        return buy_price, sell_price
+
+
+    def place_buy_order(self, order_size, buy_price):
+        """Place a buy order."""
+        try:
+            buy_order = self.exchange.create_limit_buy_order(self.trading_pair, order_size, buy_price)
+            print(f"Buy order placed - Price: {buy_price:.6f} - Amount: {order_size:.6f}", flush=True)
+            return buy_order
+        except Exception as e:
+            print(f"Error placing buy order: {e}", flush=True)
+            return None
+
+
+    def place_sell_order(self, order_size, sell_price):
+        """Place a sell order."""
+        try:
+            sell_order = self.exchange.create_limit_sell_order(self.trading_pair, order_size, sell_price)
+            print(f"Sell order placed - Price: {sell_price:.6f} - Amount: {order_size:.6f}", flush=True)
+            return sell_order
+        except Exception as e:
+            print(f"Error placing sell order: {e}", flush=True)
+            return None
+
+
+    def cancel_all_open_orders(self):
+        try:
+            # Fetch open orders for the current trading pair
+            open_orders = self.exchange.fetch_open_orders(self.trading_pair)
+            for order in open_orders:
+                # Ensure the order belongs to the current trading pair
+                if order['symbol'] != self.trading_pair:
+                    continue
+
+                # Fetch the latest order status
+                order_status = self.exchange.fetch_order(order['id'], self.trading_pair)
+                if order_status['status'] in ['closed', 'filled']:
+                    print(f"Order {order['id']} already filled. Skipping adjustment.", flush=True)
+                    continue
+
+                # Cancel the order
+                self.exchange.cancel_order(order['id'], self.trading_pair)
+                print(f"Canceled order {order['id']} for {self.trading_pair}.", flush=True)
+        except Exception as e:
+            print(f"Error canceling open orders for {self.trading_pair}: {e}", flush=True)
+
+
+    def adjust_orders(self):
+        """Adjust existing buy and sell orders or place new ones if none exist."""
+        try:
+            # Fetch open orders for the current trading pair
+            open_orders = self.exchange.fetch_open_orders(self.trading_pair)
+
+            if not open_orders:
+                print(f"No open orders found for {self.trading_pair}. Placing new orders.", flush=True)
+
+                # Fetch the current market price
+                ticker = self.fetch_market_data()
+                if not ticker:
+                    print(f"Failed to fetch market data for {self.trading_pair}.", flush=True)
                     return
 
-                print(f"Scalping - {self.trading_pair} - Entry Price: {entry_price}, Target Price: {target_price}, Stop Loss: {stop_loss_price}, Position Size: {self.position_size}", flush=True)
+                current_price = ticker['last']
+                buy_price, sell_price = self.calculate_order_prices(current_price)
+                order_size = self.calculate_position_size()
 
-                try:
-                    # Place a buy order
-                    buy_order = self.exchange.create_market_buy_order(self.trading_pair, self.position_size)
+                # Ensure order size meets minimum requirements
+                min_order_size = self.get_minimum_order_size()
+                min_notional = self.get_minimum_notional()
+                if order_size < min_order_size:
+                    order_size = min_order_size
+                notional_value = order_size * current_price
+                if notional_value < min_notional:
+                    buffer = 10 ** -self.exchange.markets[self.trading_pair]['precision']['amount']
+                    order_size = (min_notional / current_price) + buffer
+                    order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
 
-                    # Extract the price at which the order was executed
-                    executed_price = buy_order.get('price')
-                    if not executed_price or executed_price == 0:
-                        executed_price = buy_order['cost'] / buy_order['filled'] if buy_order['filled'] > 0 else None
+                # Place new orders
+                self.place_buy_order(order_size, buy_price)
+                self.place_sell_order(order_size, sell_price)
+                return
 
-                    # Amount bought in base currency
-                    amount_bought = buy_order.get('filled', 0)  # `filled` indicates how much of the base currency was purchased
-                    # Total cost in quote currency
-                    total_cost = buy_order.get('cost', 0)  # `cost` indicates the total spent in the quote currency
+            # If there are open orders, adjust them
+            order_book = self.exchange.fetch_order_book(self.trading_pair)
+            best_bid = order_book['bids'][0][0]
+            best_ask = order_book['asks'][0][0]
 
-                    # Refresh balance after buy order
-                    self.refresh_balance()
+            # Calculate new prices
+            new_buy_price = best_bid * (1 - self.trading_fee)
+            new_sell_price = best_ask * (1 + self.trading_fee)
 
-                    if executed_price:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed - Order ID {buy_order['id']} - "
-                              f"Executed Price: {executed_price} - Crypto amount Bought: {amount_bought} - USDT Cost: {total_cost} "
-                              f"- USDT Balance: {self.available_balance}", flush=True)
-                    else:
-                        print(f"Scalping - {self.trading_pair} - Buy order placed - Order ID {buy_order['id']} - "
-                              f"Executed Price: Unknown - Crypto Amount Bought: {amount_bought} - USDT Cost: {total_cost} "
-                              f"- USDT Balance: {self.available_balance}", flush=True)
+            # Ensure precision
+            new_buy_price = float(self.exchange.price_to_precision(self.trading_pair, new_buy_price))
+            new_sell_price = float(self.exchange.price_to_precision(self.trading_pair, new_sell_price))
 
-                    # Monitor price for target or stop-loss
-                    while True:
-                        current_price = self.fetch_market_data()['last']
-                        if current_price >= target_price:
-                            # Place a sell order to take profit
-                            sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
-                            # Refresh balance after sell order
-                            self.refresh_balance()
-                            print(f"Scalping - {self.trading_pair} - Sell order placed at target {target_price} - Order ID {sell_order['id']} - USDT Balance: {self.available_balance}", flush=True)
-                            break
-                        elif current_price <= stop_loss_price:
-                            # Place a sell order to stop loss
-                            sell_order = self.exchange.create_market_sell_order(self.trading_pair, self.position_size)
-                            # Refresh balance after sell order
-                            self.refresh_balance()
-                            print(f"Scalping - {self.trading_pair} - Stop Loss triggered at {stop_loss_price} - Order ID {sell_order['id']} - USDT Balance: {self.available_balance}", flush=True)
-                            break
-                        time.sleep(5)  # Adjust based on desired frequency
-                except Exception as e:
-                    print(f"Error executing scalping strategy: {e}", flush=True)
+            for order in open_orders:
+                if order['side'] == 'buy' and abs(order['price'] - new_buy_price) > (best_bid * 0.001):
+                    self.exchange.cancel_order(order['id'], self.trading_pair)
+                    print(f"Adjusted buy order. New price: {new_buy_price:.6f}", flush=True)
+                    self.place_buy_order(order['amount'], new_buy_price)
+                elif order['side'] == 'sell' and abs(order['price'] - new_sell_price) > (best_ask * 0.001):
+                    self.exchange.cancel_order(order['id'], self.trading_pair)
+                    print(f"Adjusted sell order. New price: {new_sell_price:.6f}", flush=True)
+                    self.place_sell_order(order['amount'], new_sell_price)
 
-                # Pause briefly before starting the next cycle
-                print(f"Scalping - {self.trading_pair} - Cycle complete. Restarting...")
-                time.sleep(60)
+        except Exception as e:
+            print(f"Error adjusting orders for {self.trading_pair}: {e}", flush=True)
 
 
     def market_making_strategy(self):
@@ -185,94 +240,60 @@ class TradingBot:
 
         while not self.stop_flag.is_set():
             try:
-                print(f"Market making - {self.trading_pair} - Fetching market data...")
+                while self.is_downward_trend():
+                    print(f"Downward trend detected. Canceling open orders and pausing...", flush=True)
+                    self.cancel_all_open_orders()
+                    time.sleep(self.trade_interval)
+
+                print(f"Market making - {self.trading_pair} - Fetching market data...", flush=True)
                 ticker = self.fetch_market_data()
                 if not ticker:
-                    print(f"Market making - {self.trading_pair} - Failed to fetch market data.")
+                    print(f"Market making - {self.trading_pair} - Failed to fetch market data.", flush=True)
                     time.sleep(5)
                     continue
 
                 current_price = ticker['last']
-                print(f"Market making - {self.trading_pair} - Current price: {current_price:.6f}")
+                print(f"Market making - {self.trading_pair} - Current price: {current_price:.6f}", flush=True)
+                self.refresh_balance()
 
-                # Fetch market limits
+                # Fetch market limits and calculate order size
                 min_notional = self.get_minimum_notional()
                 min_order_size = self.get_minimum_order_size()
+                order_size = self.calculate_position_size()
 
-                # Calculate limit order prices adjusted for fees
-                buy_price = current_price * (1 - self.spread_percentage - self.trading_fee)
-                sell_price = current_price * (1 + self.spread_percentage + self.trading_fee)
-                print(f"Market making - {self.trading_pair} - Buy price: {buy_price:.6f}, Sell price: {sell_price:.6f}")
-
-                # Calculate dynamic order size
-                order_size = self.order_size if self.order_size > 0 else self.available_balance * self.percentage_of_balance / current_price
-
-                # Adjust for minimum order size
+                # Adjust order size for limits
                 if order_size < min_order_size:
                     order_size = min_order_size
-                    print(f"Adjusted order size to meet minimum order size: {order_size:.6f}")
-
-                # Adjust for minimum notional value
-                notional_value = order_size * buy_price
+                notional_value = order_size * current_price
                 if notional_value < min_notional:
-                    print(f"Final notional value {notional_value:.6f} is still below the minimum of {min_notional}. Adjusting further...")
-                    # Add a small buffer to ensure the adjusted size exceeds the minimum notional
                     buffer = 10 ** -self.exchange.markets[self.trading_pair]['precision']['amount']
-                    order_size = (min_notional / buy_price) + buffer
+                    order_size = (min_notional / current_price) + buffer
                     order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
-                    print(f"Final adjusted order size to meet notional after precision: {order_size:.6f}")
+                if self.available_balance < order_size * current_price:
+                    print(f"Insufficient balance. Free USDT: {self.available_balance:.6f}, Required: {order_size * current_price:.6f}", flush=True)
+                    time.sleep(30)
+                    continue
 
-                # Enforce precision
-                order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
-                print(f"Final adjusted order size after precision: {order_size}")
+                # Calculate order prices and place initial orders
+                buy_price, sell_price = self.calculate_order_prices(current_price)
+                buy_order = self.place_buy_order(order_size, buy_price)
+                sell_order = self.place_sell_order(order_size, sell_price)
 
-                # Recalculate notional value after enforcing precision
-                notional_value = order_size * buy_price
-                if notional_value < min_notional:
-                    print(f"Final notional value {notional_value:.6f} is still below the minimum of {min_notional}. Adjusting further...")
-                    order_size = (min_notional / buy_price) + (10 ** -self.exchange.markets[self.trading_pair]['precision']['amount'])
-                    order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
-                    print(f"Final adjusted order size to meet notional after precision: {order_size:.6f}")
+                if not buy_order or not sell_order:
+                    time.sleep(5)
+                    continue
 
-                # Place limit buy order
-                buy_order = self.exchange.create_limit_buy_order(self.trading_pair, order_size, buy_price)
-                print(f"Market making - {self.trading_pair} - Buy order placed - Price: {buy_order['price']} - Amount: {buy_order['amount']}")
-
-                # Place limit sell order
-                sell_order = self.exchange.create_limit_sell_order(self.trading_pair, order_size, sell_price)
-                print(f"Market making - {self.trading_pair} - Sell order placed - Price: {sell_order['price']} - Amount: {sell_order['amount']}")
-
-                # Monitor orders for execution or adjust prices dynamically
-                time.sleep(60)  # TODO - Adjust the time to wait before checking if an order has been filled.
-
-                buy_order_status = self.exchange.fetch_order(buy_order['id'], self.trading_pair)
-                filled_buy = buy_order_status['status'] == 'closed'  # 'closed' means the order was filled
-                if filled_buy:
-                    print(f"Market making - {self.trading_pair} - Buy order {buy_order['id']} was filled successfully.")
-                else:
-                    self.exchange.cancel_order(buy_order['id'], self.trading_pair)
-                    print(f"Market making - {self.trading_pair} - Buy order {buy_order['id']} unfilled, canceled and will be adjusted.")
-
-                sell_order_status = self.exchange.fetch_order(sell_order['id'], self.trading_pair)
-                filled_sell = sell_order_status['status'] == 'closed'  # 'closed' means the order was filled
-                if filled_sell:
-                    print(f"Market making - {self.trading_pair} - Sell order {sell_order['id']} was filled successfully.")
-                else:
-                    self.exchange.cancel_order(sell_order['id'], self.trading_pair)
-                    print(f"Market making - {self.trading_pair} - Sell order {sell_order['id']} unfilled, canceled and will be adjusted.")
-
+                # Monitor and adjust orders dynamically
+                while not self.stop_flag.is_set():
+                    time.sleep(self.trade_interval)
+                    self.adjust_orders()
             except Exception as e:
-                print(f"Error executing market making strategy for {self.trading_pair}: {e}")
+                print(f"Error executing market making strategy for {self.trading_pair}: {e}", flush=True)
                 time.sleep(5)
 
 
     def run(self):
-        if self.strategy == 'market_making':
-            self.market_making_strategy()
-        elif self.strategy == 'scalping':
-            self.scalping_strategy()
-        else:
-            print("Invalid strategy selected", flush=True)
+        self.market_making_strategy()
 
 
     def stop(self):
@@ -280,13 +301,12 @@ class TradingBot:
 
 
 if __name__ == "__main__":
-    strat = os.getenv("STRATEGY", "market_making") # One of ["scalping", "market_making"]
     trading_pairs = os.getenv("TRADING_PAIRS", "ADA/USDT,CKB/USDT").split(",")
     bots = []
 
     # Start bots
     for i, pair in enumerate(trading_pairs):
-        bot = TradingBot(trading_pair=pair, strategy=strat)
+        bot = TradingBot(trading_pair=pair)
         thread = threading.Thread(target=bot.run)
         bots.append((bot, thread))
         thread.start()
