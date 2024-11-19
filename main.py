@@ -13,6 +13,7 @@ class TradingBot:
         self.spread_percentage = float(os.getenv("SPREAD_PERCENTAGE", 0.025))  # Market Making, Default 2.5% # TODO - Dynamically adjust based on market conditions.
         self.percentage_of_balance = float(os.getenv("PERCENTAGE_OF_BALANCE", 0.05))
         self.trade_interval = float(os.getenv("TRADE_INTERVAL", 30))
+        self.moving_average_timeframe = os.getenv("MOVING_EMA_TIMEFRAME", "15m")
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
 
@@ -35,9 +36,9 @@ class TradingBot:
         self.available_balance = 0  # Keep track of remaining base currency amount
 
         # Load markets to fetch trading pair metadata
-        print("Loading Binance markets...", flush=True)
+        print(f"{self.trading_pair} - Loading Binance markets...", flush=True)
         self.exchange.load_markets()
-        print("Markets loaded successfully.", flush=True)
+        print(f"{self.trading_pair} - Markets loaded successfully.", flush=True)
 
 
     def fetch_market_data(self):
@@ -63,7 +64,7 @@ class TradingBot:
         try:
             market = self.exchange.market(self.trading_pair)
             min_notional = market['limits']['cost']['min']  # Minimum notional value
-            print(f"Market making - {self.trading_pair} - Minimum notional: {min_notional}", flush=True)
+            print(f"{self.trading_pair} - Minimum notional: {min_notional}", flush=True)
             return min_notional
         except Exception as e:
             print(f"Error fetching minimum notional for {self.trading_pair}: {e}", flush=True)
@@ -74,7 +75,7 @@ class TradingBot:
         try:
             market = self.exchange.market(self.trading_pair)
             min_order_size = market['limits']['amount']['min']  # Minimum order size
-            print(f"Market making - {self.trading_pair} - Minimum order size: {min_order_size}", flush=True)
+            print(f"{self.trading_pair} - Minimum order size: {min_order_size}", flush=True)
             return min_order_size
         except Exception as e:
             print(f"Error fetching minimum order size for {self.trading_pair}: {e}", flush=True)
@@ -104,7 +105,7 @@ class TradingBot:
     def is_downward_trend(self, period=5):
         try:
             # Fetch historical data for the trading pair
-            ohlcv = self.exchange.fetch_ohlcv(self.trading_pair, timeframe='1m', limit=period)
+            ohlcv = self.exchange.fetch_ohlcv(self.trading_pair, timeframe=self.moving_average_timeframe, limit=period)
             close_prices = [x[4] for x in ohlcv]  # Extract closing prices
 
             # Calculate a simple moving average
@@ -112,7 +113,7 @@ class TradingBot:
 
             # Compare the latest price to the average
             current_price = close_prices[-1]
-            print(f"Current price: {current_price}, Moving average: {avg_price}", flush=True)
+            print(f"{self.trading_pair} - Current price: {current_price}, Moving average: {avg_price}", flush=True)
             return current_price < avg_price  # Downward trend if current price < average
         except Exception as e:
             print(f"Error detecting trend for {self.trading_pair}: {e}")
@@ -132,10 +133,10 @@ class TradingBot:
         """Place a buy order."""
         try:
             buy_order = self.exchange.create_limit_buy_order(self.trading_pair, order_size, buy_price)
-            print(f"Buy order placed - Price: {buy_price:.6f} - Amount: {order_size:.6f}", flush=True)
+            print(f"{self.trading_pair} - Buy order placed - Price: {buy_price:.6f} - Amount: {order_size:.6f}", flush=True)
             return buy_order
         except Exception as e:
-            print(f"Error placing buy order: {e}", flush=True)
+            print(f"{self.trading_pair} - Error placing buy order: {e}", flush=True)
             return None
 
 
@@ -143,10 +144,10 @@ class TradingBot:
         """Place a sell order."""
         try:
             sell_order = self.exchange.create_limit_sell_order(self.trading_pair, order_size, sell_price)
-            print(f"Sell order placed - Price: {sell_price:.6f} - Amount: {order_size:.6f}", flush=True)
+            print(f"{self.trading_pair} - Sell order placed - Price: {sell_price:.6f} - Amount: {order_size:.6f}", flush=True)
             return sell_order
         except Exception as e:
-            print(f"Error placing sell order: {e}", flush=True)
+            print(f"{self.trading_pair} - Error placing sell order: {e}", flush=True)
             return None
 
 
@@ -162,12 +163,12 @@ class TradingBot:
                 # Fetch the latest order status
                 order_status = self.exchange.fetch_order(order['id'], self.trading_pair)
                 if order_status['status'] in ['closed', 'filled']:
-                    print(f"Order {order['id']} already filled. Skipping adjustment.", flush=True)
+                    print(f"{self.trading_pair} - Order {order['id']} already filled. Skipping adjustment.", flush=True)
                     continue
 
                 # Cancel the order
                 self.exchange.cancel_order(order['id'], self.trading_pair)
-                print(f"Canceled order {order['id']} for {self.trading_pair}.", flush=True)
+                print(f"{self.trading_pair} - Canceled order {order['id']}.", flush=True)
         except Exception as e:
             print(f"Error canceling open orders for {self.trading_pair}: {e}", flush=True)
 
@@ -210,24 +211,24 @@ class TradingBot:
 
             # Ensure a buy order exists
             if not buy_order:
-                print(f"No buy order found for {self.trading_pair}. Placing new buy order.", flush=True)
+                print(f"{self.trading_pair} - No buy order found. Placing new buy order.", flush=True)
                 self.place_buy_order(order_size, buy_price)
             else:
                 # Adjust buy order if needed
                 if abs(buy_order['price'] - buy_price) > (current_price * 0.001):
                     self.exchange.cancel_order(buy_order['id'], self.trading_pair)
-                    print(f"Adjusted buy order. New price: {buy_price:.6f}", flush=True)
+                    print(f"{self.trading_pair} - Adjusted buy order. New price: {buy_price:.6f}", flush=True)
                     self.place_buy_order(order_size, buy_price)
 
             # Ensure a sell order exists
             if not sell_order:
-                print(f"No sell order found for {self.trading_pair}. Placing new sell order.", flush=True)
+                print(f"{self.trading_pair} - No sell order found. Placing new sell order.", flush=True)
                 self.place_sell_order(order_size, sell_price)
             else:
                 # Adjust sell order if needed
                 if abs(sell_order['price'] - sell_price) > (current_price * 0.001):
                     self.exchange.cancel_order(sell_order['id'], self.trading_pair)
-                    print(f"Adjusted sell order. New price: {sell_price:.6f}", flush=True)
+                    print(f"{self.trading_pair} - Adjusted sell order. New price: {sell_price:.6f}", flush=True)
                     self.place_sell_order(order_size, sell_price)
 
         except Exception as e:
@@ -237,24 +238,24 @@ class TradingBot:
 
     def market_making_strategy(self):
         if self.spread_percentage < 2 * self.trading_fee:
-            raise ValueError(f"Spread percentage ({self.spread_percentage}) is too low to cover trading fees ({2 * self.trading_fee}%). Increase the spread.")
+            raise ValueError(f"{self.trading_pair} - Spread percentage ({self.spread_percentage}) is too low to cover trading fees ({2 * self.trading_fee}%). Increase the spread.")
 
         while not self.stop_flag.is_set():
             try:
                 while self.is_downward_trend():
-                    print(f"Downward trend detected. Canceling open orders and pausing...", flush=True)
+                    print(f"{self.trading_pair} - Downward trend detected. Canceling open orders and pausing...", flush=True)
                     self.cancel_all_open_orders()
                     time.sleep(self.trade_interval)
 
-                print(f"Market making - {self.trading_pair} - Fetching market data...", flush=True)
+                print(f"{self.trading_pair} - Fetching market data...", flush=True)
                 ticker = self.fetch_market_data()
                 if not ticker:
-                    print(f"Market making - {self.trading_pair} - Failed to fetch market data.", flush=True)
+                    print(f"{self.trading_pair} - Failed to fetch market data.", flush=True)
                     time.sleep(5)
                     continue
 
                 current_price = ticker['last']
-                print(f"Market making - {self.trading_pair} - Current price: {current_price:.6f}", flush=True)
+                print(f"{self.trading_pair} - Current price: {current_price:.6f}", flush=True)
                 self.refresh_balance()
 
                 # Fetch market limits and calculate order size
@@ -271,7 +272,7 @@ class TradingBot:
                     order_size = (min_notional / current_price) + buffer
                     order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
                 if self.available_balance < order_size * current_price:
-                    print(f"Insufficient balance. Free USDT: {self.available_balance:.6f}, Required: {order_size * current_price:.6f}", flush=True)
+                    print(f"{self.trading_pair} - Insufficient balance. Free USDT: {self.available_balance:.6f}, Required: {order_size * current_price:.6f}", flush=True)
                     time.sleep(30)
                     continue
 
