@@ -104,7 +104,7 @@ class TradingBot:
     def is_downward_trend(self, period=5):
         try:
             # Fetch historical data for the trading pair
-            ohlcv = self.exchange.fetch_ohlcv(self.trading_pair, timeframe='15m', limit=period)
+            ohlcv = self.exchange.fetch_ohlcv(self.trading_pair, timeframe='1m', limit=period)
             close_prices = [x[4] for x in ohlcv]  # Extract closing prices
 
             # Calculate a simple moving average
@@ -121,8 +121,8 @@ class TradingBot:
 
     def calculate_order_prices(self, current_price):
         """Calculate buy and sell prices based on current price and spread."""
-        buy_price = current_price * (1 - self.spread_percentage - self.trading_fee)
-        sell_price = current_price * (1 + self.spread_percentage + self.trading_fee)
+        buy_price = current_price * (1 - self.spread_percentage)
+        sell_price = current_price * (1 + self.spread_percentage)
         buy_price = float(self.exchange.price_to_precision(self.trading_pair, buy_price))
         sell_price = float(self.exchange.price_to_precision(self.trading_pair, sell_price))
         return buy_price, sell_price
@@ -173,65 +173,66 @@ class TradingBot:
 
 
     def adjust_orders(self):
-        """Adjust existing buy and sell orders or place new ones if none exist."""
+        """Ensure both buy and sell orders are present, or adjust existing orders."""
         try:
             # Fetch open orders for the current trading pair
             open_orders = self.exchange.fetch_open_orders(self.trading_pair)
 
-            if not open_orders:
-                print(f"No open orders found for {self.trading_pair}. Placing new orders.", flush=True)
+            # Separate existing buy and sell orders
+            buy_order = None
+            sell_order = None
+            for order in open_orders:
+                if order['side'] == 'buy':
+                    buy_order = order
+                elif order['side'] == 'sell':
+                    sell_order = order
 
-                # Fetch the current market price
-                ticker = self.fetch_market_data()
-                if not ticker:
-                    print(f"Failed to fetch market data for {self.trading_pair}.", flush=True)
-                    return
-
-                current_price = ticker['last']
-                buy_price, sell_price = self.calculate_order_prices(current_price)
-                order_size = self.calculate_position_size()
-
-                # Ensure order size meets minimum requirements
-                min_order_size = self.get_minimum_order_size()
-                min_notional = self.get_minimum_notional()
-                if order_size < min_order_size:
-                    order_size = min_order_size
-                notional_value = order_size * current_price
-                if notional_value < min_notional:
-                    buffer = 10 ** -self.exchange.markets[self.trading_pair]['precision']['amount']
-                    order_size = (min_notional / current_price) + buffer
-                    order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
-
-                # Place new orders
-                self.place_buy_order(order_size, buy_price)
-                self.place_sell_order(order_size, sell_price)
+            # Fetch the current market price
+            ticker = self.fetch_market_data()
+            if not ticker:
+                print(f"Failed to fetch market data for {self.trading_pair}.", flush=True)
                 return
 
-            # If there are open orders, adjust them
-            order_book = self.exchange.fetch_order_book(self.trading_pair)
-            best_bid = order_book['bids'][0][0]
-            best_ask = order_book['asks'][0][0]
+            current_price = ticker['last']
+            buy_price, sell_price = self.calculate_order_prices(current_price)
+            order_size = self.calculate_position_size()
 
-            # Calculate new prices
-            new_buy_price = best_bid * (1 - self.trading_fee)
-            new_sell_price = best_ask * (1 + self.trading_fee)
+            # Ensure order size meets minimum requirements
+            min_order_size = self.get_minimum_order_size()
+            min_notional = self.get_minimum_notional()
+            if order_size < min_order_size:
+                order_size = min_order_size
+            notional_value = order_size * current_price
+            if notional_value < min_notional:
+                buffer = 10 ** -self.exchange.markets[self.trading_pair]['precision']['amount']
+                order_size = (min_notional / current_price) + buffer
+                order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
 
-            # Ensure precision
-            new_buy_price = float(self.exchange.price_to_precision(self.trading_pair, new_buy_price))
-            new_sell_price = float(self.exchange.price_to_precision(self.trading_pair, new_sell_price))
+            # Ensure a buy order exists
+            if not buy_order:
+                print(f"No buy order found for {self.trading_pair}. Placing new buy order.", flush=True)
+                self.place_buy_order(order_size, buy_price)
+            else:
+                # Adjust buy order if needed
+                if abs(buy_order['price'] - buy_price) > (current_price * 0.001):
+                    self.exchange.cancel_order(buy_order['id'], self.trading_pair)
+                    print(f"Adjusted buy order. New price: {buy_price:.6f}", flush=True)
+                    self.place_buy_order(order_size, buy_price)
 
-            for order in open_orders:
-                if order['side'] == 'buy' and abs(order['price'] - new_buy_price) > (best_bid * 0.001):
-                    self.exchange.cancel_order(order['id'], self.trading_pair)
-                    print(f"Adjusted buy order. New price: {new_buy_price:.6f}", flush=True)
-                    self.place_buy_order(order['amount'], new_buy_price)
-                elif order['side'] == 'sell' and abs(order['price'] - new_sell_price) > (best_ask * 0.001):
-                    self.exchange.cancel_order(order['id'], self.trading_pair)
-                    print(f"Adjusted sell order. New price: {new_sell_price:.6f}", flush=True)
-                    self.place_sell_order(order['amount'], new_sell_price)
+            # Ensure a sell order exists
+            if not sell_order:
+                print(f"No sell order found for {self.trading_pair}. Placing new sell order.", flush=True)
+                self.place_sell_order(order_size, sell_price)
+            else:
+                # Adjust sell order if needed
+                if abs(sell_order['price'] - sell_price) > (current_price * 0.001):
+                    self.exchange.cancel_order(sell_order['id'], self.trading_pair)
+                    print(f"Adjusted sell order. New price: {sell_price:.6f}", flush=True)
+                    self.place_sell_order(order_size, sell_price)
 
         except Exception as e:
             print(f"Error adjusting orders for {self.trading_pair}: {e}", flush=True)
+
 
 
     def market_making_strategy(self):
