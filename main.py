@@ -14,6 +14,7 @@ class TradingBot:
         self.fixed_trade_value = float(os.getenv("FIXED_TRADE_VALUE", 6.0))  # Default to $6 per trade, Binance minimum is $5..
         self.trade_interval = float(os.getenv("TRADE_INTERVAL", 30))
         self.moving_average_timeframe = os.getenv("MOVING_EMA_TIMEFRAME", "5m")
+        self.down_trend_protection = os.getenv("DOWNTREND_PROTECT", "True").lower() in ["true", "1"]
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
 
@@ -110,17 +111,20 @@ class TradingBot:
 
     def is_downward_trend(self, period=5):
         try:
-            # Fetch historical data for the trading pair
-            ohlcv = self.exchange.fetch_ohlcv(self.trading_pair, timeframe=self.moving_average_timeframe, limit=period)
-            close_prices = [x[4] for x in ohlcv]  # Extract closing prices
+            if self.down_trend_protection:
+                # Fetch historical data for the trading pair
+                ohlcv = self.exchange.fetch_ohlcv(self.trading_pair, timeframe=self.moving_average_timeframe, limit=period)
+                close_prices = [x[4] for x in ohlcv]  # Extract closing prices
 
-            # Calculate a simple moving average
-            avg_price = sum(close_prices) / len(close_prices)
+                # Calculate a simple moving average
+                avg_price = sum(close_prices) / len(close_prices)
 
-            # Compare the latest price to the average
-            current_price = close_prices[-1]
-            print(f"{self.trading_pair} - Current price: {current_price}, Moving average: {avg_price}", flush=True)
-            return current_price < avg_price  # Downward trend if current price < average
+                # Compare the latest price to the average
+                current_price = close_prices[-1]
+                print(f"{self.trading_pair} - Current price: {current_price}, Moving average: {avg_price}", flush=True)
+                return current_price < avg_price  # Downward trend if current price < average
+            else:
+                return False
         except Exception as e:
             print(f"Error detecting trend for {self.trading_pair}: {e}")
             return False
