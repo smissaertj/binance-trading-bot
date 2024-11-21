@@ -11,9 +11,9 @@ class TradingBot:
         self.api_secret = os.getenv("API_SECRET")
         self.trading_fee = float(os.getenv("TRADING_FEE", 0.001))  # Default Binance 0.1% Spot Trading fee
         self.spread_percentage = float(os.getenv("SPREAD_PERCENTAGE", 0.025))  # Market Making, Default 2.5% # TODO - Dynamically adjust based on market conditions.
-        self.percentage_of_balance = float(os.getenv("PERCENTAGE_OF_BALANCE", 0.05))
+        self.fixed_trade_value = float(os.getenv("FIXED_TRADE_VALUE", 6.0))  # Default to $6 per trade, Binance minimum is $5..
         self.trade_interval = float(os.getenv("TRADE_INTERVAL", 30))
-        self.moving_average_timeframe = os.getenv("MOVING_EMA_TIMEFRAME", "15m")
+        self.moving_average_timeframe = os.getenv("MOVING_EMA_TIMEFRAME", "5m")
         self.stop_flag = threading.Event()  # Create a stop flag
         sandbox_mode = os.getenv("SANDBOX_MODE", "True").lower() in ["true", "1"]
 
@@ -40,6 +40,9 @@ class TradingBot:
         self.exchange.load_markets()
         print(f"{self.trading_pair} - Markets loaded successfully.", flush=True)
 
+        if self.fixed_trade_value < 5.0:  # Binance minimum
+            raise ValueError(f"{self.trading_pair} - Fixed trade value ({self.fixed_trade_value}) must be at least $5 to meet Binance's minimum notional requirements.")
+
 
     def fetch_market_data(self):
         try:
@@ -60,17 +63,6 @@ class TradingBot:
             print(f"Error refreshing balance for {self.trading_pair}: {e}", flush=True)
 
 
-    def get_minimum_notional(self):
-        try:
-            market = self.exchange.market(self.trading_pair)
-            min_notional = market['limits']['cost']['min']  # Minimum notional value
-            print(f"{self.trading_pair} - Minimum notional: {min_notional}", flush=True)
-            return min_notional
-        except Exception as e:
-            print(f"Error fetching minimum notional for {self.trading_pair}: {e}", flush=True)
-            return 0
-
-
     def get_minimum_order_size(self):
         try:
             market = self.exchange.market(self.trading_pair)
@@ -83,20 +75,34 @@ class TradingBot:
 
 
     def calculate_position_size(self):
+        """
+        Calculate the position size based on the fixed trade value and current price.
+        Ensure the size meets the minimum order size requirements.
+        """
         try:
-            quote_currency = self.trading_pair.split('/')[1]  # Extract quote currency, e.g., 'USDT'
-
             # Fetch the current price of the trading pair
             ticker = self.fetch_market_data()
             if not ticker:
                 raise ValueError(f"Could not fetch {self.trading_pair} market data for position size calculation.")
             current_price = ticker['last']
 
-            # Calculate position size for buy orders
-            position_size = (self.available_balance * self.percentage_of_balance) / current_price
+            # Calculate position size using the fixed trade value
+            position_size = self.fixed_trade_value / current_price
+
+            # Apply exchange precision
             position_size = float(self.exchange.amount_to_precision(self.trading_pair, position_size))
-            print(f"[{self.trading_pair}] Available Balance: {self.available_balance:.2f} {quote_currency}, Position Size: {position_size:.6f}", flush=True)
+
+            # Validate against minimum order size
+            min_order_size = self.get_minimum_order_size()
+            if position_size < min_order_size:
+                raise ValueError(
+                    f"{self.trading_pair} - Calculated position size {position_size} is below the minimum order size {min_order_size}. "
+                    "Consider increasing FIXED_TRADE_VALUE."
+                )
+
+            print(f"[{self.trading_pair}] - Fixed Trade Value: {self.fixed_trade_value:.2f}, Position Size: {position_size:.6f}, Current Price: {current_price:.6f}", flush=True)
             return position_size
+
         except Exception as e:
             print(f"Error calculating position size for {self.trading_pair}: {e}", flush=True)
             return 0
@@ -174,7 +180,10 @@ class TradingBot:
 
 
     def adjust_orders(self):
-        """Ensure both buy and sell orders are present, or adjust existing orders."""
+        """
+        Ensure both buy and sell orders are present, or adjust existing orders.
+        Maintain at most one buy and one sell order at any time.
+        """
         try:
             # Fetch open orders for the current trading pair
             open_orders = self.exchange.fetch_open_orders(self.trading_pair)
@@ -184,48 +193,48 @@ class TradingBot:
             sell_order = None
             for order in open_orders:
                 if order['side'] == 'buy':
-                    buy_order = order
+                    if buy_order:  # Cancel any redundant buy orders
+                        self.exchange.cancel_order(order['id'], self.trading_pair)
+                        print(f"{self.trading_pair} - Canceled redundant buy order: {order['id']}", flush=True)
+                    else:
+                        buy_order = order
                 elif order['side'] == 'sell':
-                    sell_order = order
+                    if sell_order:  # Cancel any redundant sell orders
+                        self.exchange.cancel_order(order['id'], self.trading_pair)
+                        print(f"{self.trading_pair} - Canceled redundant sell order: {order['id']}", flush=True)
+                    else:
+                        sell_order = order
 
             # Fetch the current market price
             ticker = self.fetch_market_data()
             if not ticker:
-                print(f"Failed to fetch market data for {self.trading_pair}.", flush=True)
+                print(f"{self.trading_pair} - Failed to fetch market data.", flush=True)
                 return
 
             current_price = ticker['last']
             buy_price, sell_price = self.calculate_order_prices(current_price)
             order_size = self.calculate_position_size()
 
-            # Ensure order size meets minimum requirements
-            min_order_size = self.get_minimum_order_size()
-            min_notional = self.get_minimum_notional()
-            if order_size < min_order_size:
-                order_size = min_order_size
-            notional_value = order_size * current_price
-            if notional_value < min_notional:
-                buffer = 10 ** -self.exchange.markets[self.trading_pair]['precision']['amount']
-                order_size = (min_notional / current_price) + buffer
-                order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
+            # Ensure sufficient balance for fixed trade value
+            if self.available_balance < self.fixed_trade_value:
+                print(f"{self.trading_pair} - Insufficient balance for trade. Available: {self.available_balance:.2f} USDT, Required: {self.fixed_trade_value:.2f}", flush=True)
+                return
 
-            # Ensure a buy order exists
+            # Manage buy order
             if not buy_order:
                 print(f"{self.trading_pair} - No buy order found. Placing new buy order.", flush=True)
                 self.place_buy_order(order_size, buy_price)
             else:
-                # Adjust buy order if needed
                 if abs(buy_order['price'] - buy_price) > (current_price * 0.001):
                     self.exchange.cancel_order(buy_order['id'], self.trading_pair)
                     print(f"{self.trading_pair} - Adjusted buy order. New price: {buy_price:.6f}", flush=True)
                     self.place_buy_order(order_size, buy_price)
 
-            # Ensure a sell order exists
+            # Manage sell order
             if not sell_order:
                 print(f"{self.trading_pair} - No sell order found. Placing new sell order.", flush=True)
                 self.place_sell_order(order_size, sell_price)
             else:
-                # Adjust sell order if needed
                 if abs(sell_order['price'] - sell_price) > (current_price * 0.001):
                     self.exchange.cancel_order(sell_order['id'], self.trading_pair)
                     print(f"{self.trading_pair} - Adjusted sell order. New price: {sell_price:.6f}", flush=True)
@@ -237,16 +246,16 @@ class TradingBot:
 
 
     def market_making_strategy(self):
+        """
+        Core market-making logic that manages buy and sell orders.
+        """
         if self.spread_percentage < 2 * self.trading_fee:
-            raise ValueError(f"{self.trading_pair} - Spread percentage ({self.spread_percentage}) is too low to cover trading fees ({2 * self.trading_fee}%). Increase the spread.")
+            raise ValueError(
+                f"{self.trading_pair} - Spread percentage ({self.spread_percentage}) is too low to cover trading fees ({2 * self.trading_fee}%). Increase the spread."
+            )
 
         while not self.stop_flag.is_set():
             try:
-                while self.is_downward_trend():
-                    print(f"{self.trading_pair} - Downward trend detected. Canceling open orders and pausing...", flush=True)
-                    self.cancel_all_open_orders()
-                    time.sleep(self.trade_interval)
-
                 print(f"{self.trading_pair} - Fetching market data...", flush=True)
                 ticker = self.fetch_market_data()
                 if not ticker:
@@ -258,37 +267,26 @@ class TradingBot:
                 print(f"{self.trading_pair} - Current price: {current_price:.6f}", flush=True)
                 self.refresh_balance()
 
-                # Fetch market limits and calculate order size
-                min_notional = self.get_minimum_notional()
-                min_order_size = self.get_minimum_order_size()
-                order_size = self.calculate_position_size()
+                # Handle downward trends with buy orders only
+                while self.is_downward_trend():
+                    print(f"{self.trading_pair} - Downward trend detected. Placing buy orders only.", flush=True)
+                    self.cancel_all_open_orders()
 
-                # Adjust order size for limits
-                if order_size < min_order_size:
-                    order_size = min_order_size
-                notional_value = order_size * current_price
-                if notional_value < min_notional:
-                    buffer = 10 ** -self.exchange.markets[self.trading_pair]['precision']['amount']
-                    order_size = (min_notional / current_price) + buffer
-                    order_size = float(self.exchange.amount_to_precision(self.trading_pair, order_size))
-                if self.available_balance < order_size * current_price:
-                    print(f"{self.trading_pair} - Insufficient balance. Free USDT: {self.available_balance:.6f}, Required: {order_size * current_price:.6f}", flush=True)
-                    time.sleep(30)
-                    continue
+                    buy_price, _ = self.calculate_order_prices(current_price)
+                    order_size = self.calculate_position_size()
 
-                # Calculate order prices and place initial orders
-                buy_price, sell_price = self.calculate_order_prices(current_price)
-                buy_order = self.place_buy_order(order_size, buy_price)
-                sell_order = self.place_sell_order(order_size, sell_price)
+                    if self.available_balance >= self.fixed_trade_value:
+                        self.place_buy_order(order_size, buy_price)
+                        print(f"{self.trading_pair} - Buy order placed during downward trend.", flush=True)
+                    else:
+                        print(f"{self.trading_pair} - Insufficient balance for buy order during downward trend.", flush=True)
 
-                if not buy_order or not sell_order:
-                    time.sleep(5)
-                    continue
-
-                # Monitor and adjust orders dynamically
-                while not self.stop_flag.is_set():
                     time.sleep(self.trade_interval)
-                    self.adjust_orders()
+
+                # Normal market-making mode
+                self.adjust_orders()
+                time.sleep(self.trade_interval)
+
             except Exception as e:
                 print(f"Error executing market making strategy for {self.trading_pair}: {e}", flush=True)
                 time.sleep(5)
@@ -303,7 +301,7 @@ class TradingBot:
 
 
 if __name__ == "__main__":
-    trading_pairs = os.getenv("TRADING_PAIRS", "ADA/USDT,CKB/USDT").split(",")
+    trading_pairs = os.getenv("TRADING_PAIRS", "ADA/USDT,CKB/USDT,BTC/USDT").split(",")
     bots = []
 
     # Start bots
