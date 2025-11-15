@@ -1,7 +1,7 @@
 import os
 import logging
 # Use AsyncClient for non-blocking operations
-from binance.client import AsyncClient
+from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
 
 class BinanceClient:
