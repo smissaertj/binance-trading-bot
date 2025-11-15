@@ -8,7 +8,7 @@ import trading_logic
 from binance_client import BinanceClient
 from binance import BinanceSocketManager
 import database
-import config  # <-- Import the new config module
+import config
 
 # --- Configuration ---
 load_dotenv()
@@ -22,9 +22,10 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(config.LOG_FILE),  # <-- Use the path from config
+        logging.FileHandler(config.LOG_FILE),
         logging.StreamHandler()
-    ]
+    ],
+    force=True
 )
 
 # --- Define Pairs to Trade ---
@@ -54,7 +55,7 @@ class Trader:
         self.symbol = config['symbol']
         self.base_asset = config['base_asset']
         self.quote_asset = config['quote_asset']
-        self.signal_interval = config['interval'] # e.g., '1h'
+        self.signal_interval = config['interval']
         self.trade_amount_usdc = config['trade_amount_usdc']
 
         # Risk parameters
@@ -357,3 +358,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Shutdown initiated by user.")
+    except Exception as e:
+        logging.error(f"A top-level error occurred: {e}", exc_info=True)
+    finally:
+        logging.shutdown()
