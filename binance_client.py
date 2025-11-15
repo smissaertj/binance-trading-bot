@@ -46,19 +46,15 @@ class BinanceClient:
 
     async def get_symbol_info(self, symbol):
         """
-        Fetches the exchange info for a specific symbol to get filters.
+        Fetches the exchange information for a specific symbol.
         """
         if not self.client:
             raise ConnectionError("Client not connected. Call connect() first.")
         
         try:
-            info = await self.client.get_exchange_info()
-            for s in info['symbols']:
-                if s['symbol'] == symbol:
-                    return s
-            return None
+            return await self.client.get_symbol_info(symbol)
         except BinanceAPIException as e:
-            logging.error(f"Error fetching exchange info for {symbol}: {e}")
+            logging.error(f"Error fetching symbol info for {symbol}: {e}")
             return None
 
     async def get_klines(self, symbol, interval, limit=100):
@@ -90,42 +86,28 @@ class BinanceClient:
             logging.error(f"Error fetching balance for {asset}: {e}")
             return 0.0
 
-    async def place_order(self, symbol, side, order_type, quantity=None, quote_order_qty=None):
+    async def place_order(self, symbol, side, order_type, **kwargs):
         """
         Places an order asynchronously. Gated by the LIVE_TRADING switch.
-        Can handle orders by base asset 'quantity' (for SELLs)
-        or quote asset 'quote_order_qty' (for BUYs).
+        Accepts kwargs to pass to the underlying client order methods.
+        e.g., quantity=, quote_order_qty=
         """
         if not self.client:
             raise ConnectionError("Client not connected. Call connect() first.")
 
+        # In paper mode, we just log the intended action and return a mock object
         if not self.live_trading:
-            logging.warning(f"PAPER MODE: Would place {side} {order_type} order for {symbol}.")
-            if quote_order_qty:
-                logging.warning(f"    (Quote Amount: {quote_order_qty} {symbol[-4:]})")
-            if quantity:
-                logging.warning(f"    (Base Quantity: {quantity} {symbol[:4]})")
-            return {'paper_trade': True, 'side': side, 'symbol': symbol, 'quantity': quantity, 'quote_order_qty': quote_order_qty}
+            logging.warning(f"PAPER MODE: Would place {side} {order_type} order for {symbol} with params: {kwargs}")
+            return {'paper_trade': True, 'side': side, 'symbol': symbol, **kwargs}
 
         try:
             if side.upper() == 'BUY':
-                if quote_order_qty:
-                    # Use quote_order_qty for fixed-USDC buys
-                    logging.info(f"Placing LIVE BUY order: {quote_order_qty} {symbol[-4:]} of {symbol}")
-                    return await self.client.order_market_buy(symbol=symbol, quoteOrderQty=quote_order_qty)
-                elif quantity:
-                    # Fallback for old method if needed
-                    logging.info(f"Placing LIVE BUY order: {quantity} {symbol[:4]}")
-                    return await self.client.order_market_buy(symbol=symbol, quantity=quantity)
+                logging.info(f"Placing LIVE BUY order: {symbol}, params: {kwargs}")
+                return await self.client.order_market_buy(symbol=symbol, **kwargs)
             
             elif side.upper() == 'SELL':
-                if quantity:
-                     # Sells MUST use base asset quantity
-                    logging.info(f"Placing LIVE SELL order: {quantity} {symbol[:4]}")
-                    return await self.client.order_market_sell(symbol=symbol, quantity=quantity)
-                else:
-                    logging.error(f"SELL order for {symbol} must have a 'quantity'.")
-                    return None
+                logging.info(f"Placing LIVE SELL order: {symbol}, params: {kwargs}")
+                return await self.client.order_market_sell(symbol=symbol, **kwargs)
                 
         except BinanceAPIException as e:
             logging.error(f"Error placing {side} order for {symbol}: {e}")

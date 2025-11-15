@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import os
 from dotenv import load_dotenv
 
 import trading_logic
@@ -8,7 +9,9 @@ from binance_client import BinanceClient
 from binance import BinanceSocketManager
 
 # --- Configuration ---
-load_dotenv()  # Load environment variables from .env file
+load_dotenv()
+TRADE_MOUNT_USDC = os.getenv('TRADE_MOUNT_USDC', '50')
+
 
 # Setup logging
 logging.basicConfig(
@@ -21,46 +24,81 @@ logging.basicConfig(
 )
 
 # --- Define Pairs to Trade ---
+logging.info(f"Using trade amount: ${TRADE_MOUNT_USDC} USDC")
 PAIRS_TO_TRADE = [
     {
         'symbol': 'ETHUSDC',
         'base_asset': 'ETH',
         'quote_asset': 'USDC',
-        'interval': '1h',
-        'trade_amount_usdc': 50  # Spend $50 USDC per BUY trade
-    }
+        'interval': '1h',                # The interval for our main BUY/SELL signals
+        'trade_amount_usdc': 50,     # Spend $50 USDC per BUY trade
+        
+        # --- Risk Management ---
+        'stop_loss_pct': 0.05,           # 5% stop-loss (e.g., sell if price drops 5% below entry)
+        'trailing_stop_pct': 0.02,       # 2% trailing stop (e.g., keep stop 2% below the highest price)
+        'take_profit_pct': 0.10,         # 10% take profit (e.g., sell if price rises 10% above entry)
+    },
 ]
 
 class Trader:
     """
-    Encapsulates the trading logic for a single trading pair.
-    This is triggered by the websocket_bot, not a loop.
+    Encapsulates the trading logic and state for a single trading pair.
     """
     def __init__(self, client, config, symbol_info):
-        self.client = client # This is our async BinanceClient wrapper
+        self.client = client
         self.symbol = config['symbol']
         self.base_asset = config['base_asset']
         self.quote_asset = config['quote_asset']
-        self.interval = config['interval']
+        self.signal_interval = config['interval'] # e.g., '1h'
         self.trade_amount_usdc = config['trade_amount_usdc']
-        self.step_size = 0.0
-        self.tick_size = 0.0
 
+        # Risk parameters
+        self.stop_loss_pct = config['stop_loss_pct']
+        self.trailing_stop_pct = config['trailing_stop_pct']
+        self.take_profit_pct = config['take_profit_pct']
+
+        # Symbol filters
+        self.step_size = 0.0
         self._process_symbol_info(symbol_info)
+
+        # --- State ---
+        self.in_position = False
+        self.entry_price = 0.0
+        self.stop_loss_price = 0.0
+        self.take_profit_price = 0.0
         
         logging.info(f"Trader for {self.symbol} initialized.")
         logging.info(f" -> Trade Amount (USDC): {self.trade_amount_usdc}")
-        logging.info(f" -> Step Size (Quantity): {self.step_size}")
+        logging.info(f" -> Stop-Loss: {self.stop_loss_pct*100}%")
+        logging.info(f" -> Trailing Stop: {self.trailing_stop_pct*100}%")
+
+    async def initialize_state(self):
+        """
+        Checks current balance on startup to see if we are already in a position.
+        This is crucial for bot restarts.
+        """
+        try:
+            base_balance = await self.client.get_balance(self.base_asset)
+            # Check if we hold a significant amount (more than 5x the min step size)
+            if base_balance > (self.step_size * 5):
+                logging.warning(f"Bot restart: Already in position with {base_balance} {self.base_asset}.")
+                logging.warning("Please set state manually or sell asset to start fresh.")
+                # In a real system, you would load self.entry_price from a database here.
+                # For this MVP, we assume a clean start or manual intervention.
+                # self.in_position = True
+                # self.entry_price = ... (load from db)
+                # self.stop_loss_price = ... (load from db)
+            else:
+                self.in_position = False
+                logging.info(f"Bot starting with no {self.base_asset} position. Ready to buy.")
+        except Exception as e:
+            logging.error(f"Error initializing state: {e}")
 
     def _process_symbol_info(self, symbol_info):
-        """
-        Extracts the 'stepSize' from the LOT_SIZE filter for formatting sell orders.
-        """
         if not symbol_info:
             logging.warning(f"Could not get symbol info for {self.symbol}. Using default step_size.")
-            self.step_size = 0.0001 # Default fallback
+            self.step_size = 0.0001
             return
-            
         try:
             for f in symbol_info['filters']:
                 if f['filterType'] == 'LOT_SIZE':
@@ -68,107 +106,176 @@ class Trader:
                     break
         except Exception as e:
             logging.error(f"Error processing symbol info: {e}")
-            self.step_size = 0.0001 # Default fallback
+            self.step_size = 0.0001
 
     def _floor_to_step(self, quantity):
-        """
-        Formats the sell quantity to the correct precision (step_size).
-        e.g., if step_size is 0.01, quantity 1.2345 becomes 1.23
-        """
         if self.step_size == 0.0:
-            return quantity # Should not happen if init is correct
-
-        # Calculate the number of decimal places from step_size
-        # e.g., 0.001 -> 3 decimal places
+            return quantity
         decimals = -int(math.log10(self.step_size))
-        
-        # Calculate factor, floor, and then divide
-        # e.g., 0.01666 ETH, decimals = 4 -> step_size 0.0001
-        # factor = 10000
-        # math.floor(0.01666 * 10000) / 10000 = math.floor(166.6) / 10000 = 166 / 10000 = 0.0166
         factor = 10 ** decimals
         return math.floor(quantity * factor) / factor
 
+    def _calculate_avg_fill_price(self, order):
+        """Calculates the average fill price from a Binance order object."""
+        try:
+            cummulative_quote_qty = float(order['cummulativeQuoteQty'])
+            executed_qty = float(order['executedQty'])
+            if executed_qty > 0:
+                return cummulative_quote_qty / executed_qty
+        except (KeyError, ValueError, ZeroDivisionError) as e:
+            logging.error(f"Could not calculate average price from order: {order}. Error: {e}")
+        return None
 
-    async def run_check(self):
+    async def _enter_position(self, current_price):
         """
-        Fetches data, analyzes it, and places an order if conditions are met.
-        This is now an async function.
+        Handles the logic for entering a BUY position.
         """
+        logging.info(f"BUY signal. Placing order for {self.trade_amount_usdc} {self.quote_asset}.")
+        order = await self.client.place_order(
+            self.symbol, 'BUY', 'MARKET', quote_order_qty=self.trade_amount_usdc
+        )
         
-        logging.info(f"--- Checking {self.symbol} ---")
-
-        # 1. Get Data
-        klines = await self.client.get_klines(self.symbol, self.interval, limit=100)
-        df = trading_logic.create_dataframe(klines)
-        if df.empty:
-            logging.warning(f"Could not create DataFrame for {self.symbol}")
+        if not order:
+            logging.error(f"Failed to enter position for {self.symbol}. Order was None.")
             return
-            
-        # 2. Get Indicators
-        df_with_indicators = trading_logic.add_indicators(df)
 
-        # 3. Get Signal (This function is synchronous, which is fine)
-        signal = trading_logic.get_signal(df_with_indicators)
-        logging.info(f"Signal for {self.symbol}: {signal}")
+        # Determine the entry price based on trade type
+        if order.get('paper_trade'):
+            entry_price = current_price # Approximation for paper trading
+            logging.info("Paper trade: using current kline price as approximate entry.")
+        
+        elif order.get('status') == 'FILLED':
+            entry_price = self._calculate_avg_fill_price(order)
+            if not entry_price:
+                logging.error("Could not determine entry price from FILLED order. Aborting.")
+                return
+            logging.info(f"Real trade: calculated average entry price: {entry_price}")
 
-        # 4. Get Account State (Balances)
+        else:
+            logging.error(f"Order was not filled or a paper trade. Status: {order.get('status')}")
+            return
+
+        # Set state based on successful order
+        self.in_position = True
+        self.entry_price = entry_price
+        self.stop_loss_price = self.entry_price * (1 - self.stop_loss_pct)
+        self.take_profit_price = self.entry_price * (1 + self.take_profit_pct)
+        
+        logging.info(f"--- ENTERED POSITION {self.symbol} ---")
+        logging.info(f"  Entry Price: {self.entry_price}")
+        logging.info(f"  Stop-Loss:   {self.stop_loss_price}")
+        logging.info(f"  Take-Profit: {self.take_profit_price}")
+
+    async def _exit_position(self, reason):
+        """
+        Handles the logic for exiting a SELL position.
+        """
         try:
             base_balance = await self.client.get_balance(self.base_asset)
-            quote_balance = await self.client.get_balance(self.quote_asset)
-            logging.info(f"Balances: {base_balance} {self.base_asset}, {quote_balance} {self.quote_asset}")
+            if base_balance < (self.step_size * 5):
+                logging.warning(f"Tried to sell, but no position found for {self.base_asset}.")
+                self.in_position = False # Reset state
+                return
+
+            sell_quantity = self._floor_to_step(base_balance)
+            logging.info(f"--- EXITING POSITION {self.symbol} ({reason}) ---")
+            logging.info(f"  Selling {sell_quantity} {self.base_asset}")
+            
+            order = await self.client.place_order(
+                self.symbol, 'SELL', 'MARKET', quantity=sell_quantity
+            )
+            
+            if order and (order.get('paper_trade') or order.get('status') == 'FILLED'):
+                # Reset state
+                self.in_position = False
+                self.entry_price = 0.0
+                self.stop_loss_price = 0.0
+                self.take_profit_price = 0.0
+                logging.info(f"Position for {self.symbol} closed.")
+            else:
+                logging.error(f"Failed to exit position: {order}")
         except Exception as e:
-            logging.error(f"Could not get balances for {self.symbol}: {e}")
+            logging.error(f"Error during exit_position: {e}")
+
+    # --- Handlers for Websocket Streams ---
+
+    async def handle_signal_candle(self, kline):
+        """
+        Runs on the main strategy interval (e.g., 1h).
+        Responsible for finding BUY signals and main SELL (take-profit) signals.
+        """
+        # 1. If we are NOT in a position, look for a BUY signal
+        if not self.in_position:
+            klines = await self.client.get_klines(self.symbol, self.signal_interval, limit=100)
+            df = trading_logic.create_dataframe(klines)
+            df_with_indicators = trading_logic.add_indicators(df)
+            signal = trading_logic.get_signal(df_with_indicators)
+            
+            if signal == 'BUY':
+                logging.info(f"SIGNAL ({self.signal_interval}): BUY signal found for {self.symbol}")
+                current_price = float(kline['c']) # Get price from the candle
+                await self._enter_position(current_price)
+            else:
+                logging.info(f"SIGNAL ({self.signal_interval}): {signal} signal. No action.")
+
+        # 2. If we ARE in a position, check for our mean-reversion SELL signal
+        #    (This acts as an *additional* take-profit, separate from the stop-loss)
+        else:
+            klines = await self.client.get_klines(self.symbol, self.signal_interval, limit=100)
+            df = trading_logic.create_dataframe(klines)
+            df_with_indicators = trading_logic.add_indicators(df)
+            signal = trading_logic.get_signal(df_with_indicators)
+            
+            if signal == 'SELL':
+                logging.info(f"SIGNAL ({self.signal_interval}): Mean-reversion SELL signal found.")
+                await self._exit_position(reason="TAKE-PROFIT (Signal)")
+            else:
+                logging.info(f"SIGNAL ({self.signal_interval}): In position, {signal} signal. Holding.")
+
+    async def handle_price_update(self, kline):
+        """
+        Runs on a fast interval (e.g., 1m).
+        Responsible *only* for risk management (stop-loss, trailing stop, take-profit).
+        """
+        if not self.in_position:
+            return # Not in a position, nothing to risk-manage
+
+        current_price = float(kline['c']) # Close price of the 1m candle
+
+        # 1. Check Stop-Loss
+        if current_price <= self.stop_loss_price:
+            logging.warning(f"RISK MGMT (1m): Price {current_price} hit STOP-LOSS {self.stop_loss_price}.")
+            await self._exit_position(reason="STOP-LOSS")
+            return # Exit, as we are no longer in a position
+
+        # 2. Check Take-Profit (Fixed Percentage)
+        if current_price >= self.take_profit_price:
+            logging.info(f"RISK MGMT (1m): Price {current_price} hit TAKE-PROFIT {self.take_profit_price}.")
+            await self._exit_position(reason="TAKE-PROFIT (Fixed)")
             return
 
-        # 5. Execute Logic (New logic based on USDC amount)
+        # 3. Check Trailing Stop-Loss
+        # Calculate a new potential stop-loss based on the trailing percentage
+        new_trailing_stop = current_price * (1 - self.trailing_stop_pct)
         
-        if signal == 'BUY':
-            if base_balance > (self.step_size * 5): 
-                # Check if we already hold a position (more than 5x the min step size)
-                logging.info(f"BUY signal, but already hold {self.base_asset}. Holding.")
-            elif quote_balance < self.trade_amount_usdc:
-                # Check if we have enough USDC to make the trade
-                logging.info(f"BUY signal, but not enough {self.quote_asset}. Need {self.trade_amount_usdc}.")
-            else:
-                logging.info(f"BUY signal detected. Placing order for {self.trade_amount_usdc} {self.quote_asset}.")
-                await self.client.place_order(
-                    self.symbol, 'BUY', 'MARKET', quote_order_qty=self.trade_amount_usdc
-                )
-
-        elif signal == 'SELL':
-            if base_balance > (self.step_size * 5): # Check if we have a position to sell
-                
-                # Format the quantity to the correct step size
-                sell_quantity = self._floor_to_step(base_balance)
-                logging.info(f"SELL signal detected. Selling {sell_quantity} {self.base_asset}.")
-                
-                await self.client.place_order(
-                    self.symbol, 'SELL', 'MARKET', quantity=sell_quantity
-                )
-            else:
-                logging.info(f"SELL signal, but no {self.base_asset} to sell. Holding.")
-
-        elif signal == 'HOLD':
-            logging.info(f"HOLD signal. No action taken for {self.symbol}.")
+        # If the new trailing stop is *higher* than our current stop-loss, "trail" it up
+        if new_trailing_stop > self.stop_loss_price:
+            self.stop_loss_price = new_trailing_stop
+            logging.debug(f"RISK MGMT (1m): Trailing stop-loss up to {self.stop_loss_price}")
 
 
 async def main():
-    """
-    Main bot entry point.
-    Initializes the client, creates Trader instances, and starts the websocket.
-    """
-    logging.info("Starting websocket trading bot...")
+    logging.info("Starting stateful websocket trading bot...")
     
     client = None
-    socket_manager = None
     try:
-        # Initialize our async client wrapper
         client = BinanceClient()
-        await client.connect() # This creates the AsyncClient
-
-        # --- Fetch symbol info BEFORE creating traders ---
+        await client.connect()
+        
         traders = {}
+        all_socket_streams = set()
+
+        # Initialize all traders and get their symbol info
         for config in PAIRS_TO_TRADE:
             symbol = config['symbol'].upper()
             symbol_info = await client.get_symbol_info(symbol)
@@ -176,78 +283,56 @@ async def main():
                 logging.error(f"Could not get symbol info for {symbol}. Skipping this pair.")
                 continue
             
-            traders[symbol] = Trader(client, config, symbol_info)
-
-        # Create a dictionary of Trader instances, keyed by symbol
-        # traders = {
-        #     config['symbol'].upper(): Trader(client, config) 
-        #     for config in PAIRS_TO_TRADE
-        # }
-        
-        # Get the underlying AsyncClient to pass to the socket manager
-        # This is a bit of a pattern: our wrapper manages the client,
-        # but the socket manager needs the raw client object.
-        raw_async_client = client.client
-        socket_manager = BinanceSocketManager(raw_async_client)
-
-        async def handle_socket_message(msg):
-            """
-            This is the callback function that the websocket will call.
-            """
-            # Uncomment to see all messages (can be noisy)
-            # logging.debug(f"Socket message: {msg}")
+            trader = Trader(client, config, symbol_info)
+            await trader.initialize_state() # Check if we're in a position
+            traders[symbol] = trader
             
-            # Check for errors
-            if msg.get('e') == 'error':
-                logging.error(f"Socket Error: {msg.get('m')}")
-                return
+            # Add this trader's streams to the global set
+            # 1. The main signal stream (e.g., 1h)
+            all_socket_streams.add(f"{symbol.lower()}@kline_{config['interval']}")
+            # 2. The risk-management stream (1m)
+            all_socket_streams.add(f"{symbol.lower()}@kline_1m")
 
-            # Check if it's a kline message
-            if msg.get('e') == 'kline':
-                symbol = msg['s'].upper()
-                kline = msg['k']
-                is_closed = kline['x']
-                interval = kline['i']
-
-                # Find the trader for this symbol
-                trader = traders.get(symbol)
-                if not trader:
-                    return # Not a symbol we are trading
-
-                # Check if it's the correct interval and if the candle is closed
-                if interval == trader.interval and is_closed:
-                    logging.info(f"--- New candle closed for {symbol} ---")
-                    # Run the trading logic check
-                    try:
-                        await trader.run_check()
-                    except Exception as e:
-                        logging.error(f"Error in trader.run_check() for {symbol}: {e}")
-
-        # --- Setup the websocket streams ---
-        
-        # We need to create a list of socket connection "keys"
-        # e.g., ['ethusdc@kline_1h', 'btcusdc@kline_1h']
-        socket_streams = [
-            f"{config['symbol'].lower()}@kline_{config['interval']}"
-            for config in PAIRS_TO_TRADE
-        ]
-        
-        if not socket_streams:
-            logging.error("No pairs to trade. Exiting.")
+        if not traders:
+            logging.error("No traders initialized. Exiting.")
             return
 
-        logging.info(f"Subscribing to streams: {socket_streams}")
+        raw_async_client = client.client
+        socket_manager = BinanceSocketManager(raw_async_client)
         
-        # Start the multiplex socket
-        # The 'handle_socket_message' function will be called for every message
-        async with socket_manager.multiplex_socket(socket_streams) as ms:
+        logging.info(f"Subscribing to {len(all_socket_streams)} streams: {all_socket_streams}")
+
+        async with socket_manager.multiplex_socket(list(all_socket_streams)) as ms:
             while True:
                 try:
                     msg = await ms.recv()
-                    await handle_socket_message(msg)
+                    
+                    if msg.get('e') == 'error':
+                        logging.error(f"Socket Error: {msg.get('m')}")
+                        continue
+                    
+                    if msg.get('e') == 'kline':
+                        symbol = msg['s'].upper()
+                        kline = msg['k']
+                        is_closed = kline['x']
+                        interval = kline['i']
+                        
+                        trader = traders.get(symbol)
+                        if not trader:
+                            continue # Not a symbol we are trading
+                        
+                        # Is this a closed candle?
+                        if is_closed:
+                            # 1. Is it a SIGNAL interval candle?
+                            if interval == trader.signal_interval:
+                                await trader.handle_signal_candle(kline)
+                            
+                            # 2. Is it a RISK MGMT interval candle?
+                            if interval == '1m':
+                                await trader.handle_price_update(kline)
+
                 except Exception as e:
                     logging.error(f"Error processing websocket message: {e}")
-                    # Brief sleep to prevent rapid-fire error loops
                     await asyncio.sleep(5)
 
     except Exception as e:
