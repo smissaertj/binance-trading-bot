@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y \
 COPY bot.py .
 COPY binance_client.py .
 COPY trading_logic.py .
+COPY database.py .
+COPY config.py .
 COPY requirements.txt .
 
 # Install Python dependencies

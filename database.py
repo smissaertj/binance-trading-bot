@@ -1,7 +1,8 @@
 import sqlite3
 import logging
+from config import DB_FILE
 
-DB_FILE = "trading_state.db"
+# The DB_FILE is now imported from the config module.
 
 def initialize_db():
     """Creates the database and the positions table if they don't exist."""

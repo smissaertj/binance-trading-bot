@@ -8,16 +8,21 @@ import trading_logic
 from binance_client import BinanceClient
 from binance import BinanceSocketManager
 import database
+import config  # <-- Import the new config module
 
 # --- Configuration ---
 load_dotenv()
+TRADE_AMOUNT_USDC = float(os.getenv('TRADE_AMOUNT_USDC', '50'))
+
+# Create the data directory *before* setting up logging
+config.setup_data_directory()
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("trading_bot.log"),
+        logging.FileHandler(config.LOG_FILE),  # <-- Use the path from config
         logging.StreamHandler()
     ]
 )
