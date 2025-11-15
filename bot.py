@@ -7,11 +7,10 @@ from dotenv import load_dotenv
 import trading_logic
 from binance_client import BinanceClient
 from binance import BinanceSocketManager
+import database
 
 # --- Configuration ---
 load_dotenv()
-TRADE_MOUNT_USDC = os.getenv('TRADE_MOUNT_USDC', '50')
-
 
 # Setup logging
 logging.basicConfig(
@@ -24,6 +23,7 @@ logging.basicConfig(
 )
 
 # --- Define Pairs to Trade ---
+TRADE_MOUNT_USDC = os.getenv('TRADE_MOUNT_USDC', '50')
 logging.info(f"Using trade amount: ${TRADE_MOUNT_USDC} USDC")
 PAIRS_TO_TRADE = [
     {
@@ -31,7 +31,7 @@ PAIRS_TO_TRADE = [
         'base_asset': 'ETH',
         'quote_asset': 'USDC',
         'interval': '1h',                # The interval for our main BUY/SELL signals
-        'trade_amount_usdc': 50,     # Spend $50 USDC per BUY trade
+        'trade_amount_usdc': TRADE_MOUNT_USDC,
         
         # --- Risk Management ---
         'stop_loss_pct': 0.05,           # 5% stop-loss (e.g., sell if price drops 5% below entry)
@@ -74,25 +74,21 @@ class Trader:
 
     async def initialize_state(self):
         """
-        Checks current balance on startup to see if we are already in a position.
-        This is crucial for bot restarts.
+        Loads state from the database on startup.
         """
-        try:
-            base_balance = await self.client.get_balance(self.base_asset)
-            # Check if we hold a significant amount (more than 5x the min step size)
-            if base_balance > (self.step_size * 5):
-                logging.warning(f"Bot restart: Already in position with {base_balance} {self.base_asset}.")
-                logging.warning("Please set state manually or sell asset to start fresh.")
-                # In a real system, you would load self.entry_price from a database here.
-                # For this MVP, we assume a clean start or manual intervention.
-                # self.in_position = True
-                # self.entry_price = ... (load from db)
-                # self.stop_loss_price = ... (load from db)
-            else:
-                self.in_position = False
-                logging.info(f"Bot starting with no {self.base_asset} position. Ready to buy.")
-        except Exception as e:
-            logging.error(f"Error initializing state: {e}")
+        logging.info(f"Initializing state for {self.symbol} from database...")
+        state = database.load_position(self.symbol)
+        
+        if state and state['in_position']:
+            self.in_position = True
+            self.entry_price = state['entry_price']
+            self.stop_loss_price = state['stop_loss_price']
+            self.take_profit_price = state['take_profit_price']
+            logging.warning(f"Bot restart: Loaded existing position for {self.symbol}.")
+            logging.info(f"  -> Entry Price: {self.entry_price}, Stop-Loss: {self.stop_loss_price}")
+        else:
+            self.in_position = False
+            logging.info(f"No active position found for {self.symbol}. Ready to buy.")
 
     def _process_symbol_info(self, symbol_info):
         if not symbol_info:
@@ -161,6 +157,10 @@ class Trader:
         self.stop_loss_price = self.entry_price * (1 - self.stop_loss_pct)
         self.take_profit_price = self.entry_price * (1 + self.take_profit_pct)
         
+        database.save_position(
+            self.symbol, True, self.entry_price, self.stop_loss_price, self.take_profit_price
+        )
+
         logging.info(f"--- ENTERED POSITION {self.symbol} ---")
         logging.info(f"  Entry Price: {self.entry_price}")
         logging.info(f"  Stop-Loss:   {self.stop_loss_price}")
@@ -191,6 +191,10 @@ class Trader:
                 self.entry_price = 0.0
                 self.stop_loss_price = 0.0
                 self.take_profit_price = 0.0
+
+                database.save_position(
+                    self.symbol, False, 0.0, 0.0, 0.0
+                )
                 logging.info(f"Position for {self.symbol} closed.")
             else:
                 logging.error(f"Failed to exit position: {order}")
@@ -266,6 +270,7 @@ class Trader:
 
 async def main():
     logging.info("Starting stateful websocket trading bot...")
+    database.initialize_db()
     
     client = None
     try:
